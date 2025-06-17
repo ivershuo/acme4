@@ -11,6 +11,7 @@ import (
 
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -18,20 +19,18 @@ import (
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
 	"gopkg.in/yaml.v2"
+
+	"acme4/providers"
 )
 
 type Config struct {
-	Email      string   `yaml:"email"`
-	Domains    []Domain `yaml:"domains"`
-	CertDir    string   `yaml:"cert_dir"`
-	AccountDir string   `yaml:"account_dir"`
+	Email          string             `yaml:"email"`
+	Domains        []providers.Domain `yaml:"domains"`
+	CertDir        string             `yaml:"cert_dir"`
+	AccountDir     string             `yaml:"account_dir"`
+	PostRenewHooks []string           `yaml:"post_renew_hooks"`
 }
 
-type Domain struct {
-	Names       []string          `yaml:"names"`
-	Provider    string            `yaml:"provider"`
-	Credentials map[string]string `yaml:"credentials"`
-}
 
 type MyUser struct {
 	Email        string
@@ -102,8 +101,8 @@ func certNeedRenew(certPath string) (bool, error) {
 	return remain < 30*24*time.Hour, nil
 }
 
-func obtainOrRenew(certDir string, user *MyUser, domain Domain) error {
-	provider, err := GetDNSProvider(domain)
+func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks []string) error {
+	provider, err := providers.GetDNSProvider(domain)
 	if err != nil {
 		return err
 	}
@@ -140,10 +139,24 @@ func obtainOrRenew(certDir string, user *MyUser, domain Domain) error {
 		_ = os.WriteFile(certPath, certs.Certificate, 0600)
 		_ = os.WriteFile(keyPath, certs.PrivateKey, 0600)
 		log.Printf("证书 %v 已更新\n", domain.Names)
+		runPostRenewHooks(hooks)
 	} else {
 		log.Printf("证书 %v 有效，无需续期\n", domain.Names)
 	}
 	return nil
+}
+
+func runPostRenewHooks(hooks []string) {
+	for _, cmdStr := range hooks {
+		log.Printf("执行后续命令: %s", cmdStr)
+		cmd := exec.Command("sh", "-c", cmdStr)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("后续命令失败: %v, 输出: %s", err, string(output))
+		} else {
+			log.Printf("后续命令成功，输出: %s", string(output))
+		}
+	}
 }
 
 func main() {
@@ -163,7 +176,7 @@ func main() {
 		log.Fatal("账户初始化失败: ", err)
 	}
 	for _, d := range cfg.Domains {
-		if err := obtainOrRenew(cfg.CertDir, user, d); err != nil {
+		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks); err != nil {
 			log.Printf("域名 %v 证书处理失败: %v\n", d.Names, err)
 		}
 	}

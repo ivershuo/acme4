@@ -20,3 +20,6 @@ domains:
       secret_api_key: "PORKBUN_SECRET_API_KEY"
 cert_dir: "./certs"
 account_dir: "./accounts"
+post_renew_hooks:
+  - "nginx -s reload"
+  # - "systemctl reload haproxy"
