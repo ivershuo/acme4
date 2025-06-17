@@ -1,0 +1,22 @@
+email: "your@email.com"
+domains:
+  - names: ["example.com", "*.example.com"]
+    provider: "hurricane"
+    credentials:
+      api_key: "HE_API_KEY"
+  - names: ["example.net"]
+    provider: "cloudflare"
+    credentials:
+      api_token: "CF_xxx"
+  - names: ["foo.com"]
+    provider: "tencentcloud"
+    credentials:
+      secret_id: "TENCENT_SECRET_ID"
+      secret_key: "TENCENT_SECRET_KEY"
+  - names: ["bar.com"]
+    provider: "porkbun"
+    credentials:
+      api_key: "PORKBUN_API_KEY"
+      secret_api_key: "PORKBUN_SECRET_API_KEY"
+cert_dir: "./certs"
+account_dir: "./accounts"

@@ -1,0 +1,22 @@
+# ACME4 ignore rules
+# Certificates and account keys (never commit these!)
+certs/
+accounts/
+*.crt
+*.key
+
+# Local config files with sensitive info
+config.yaml
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
