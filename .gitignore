@@ -7,6 +7,15 @@ accounts/
 
 # Local config files with sensitive info
 config.yaml
+config.email-example.yaml
+
+# Test files and scripts (may contain sensitive data)
+test_email.go
+test_*.yaml
+
+# Email notification config with real API keys
+*email*.yaml
+*resend*.yaml
 
 # Editor/IDE files
 .vscode/

@@ -19,18 +19,31 @@ import (
 	"github.com/go-acme/lego/v4/registration"
 	"gopkg.in/yaml.v2"
 
+	"acme4/notification"
 	"acme4/providers"
 )
 
 const renewBeforeDefault = 30 // 默认提前30天续期
 
+type EmailNotificationConfig struct {
+	Enabled         bool     `yaml:"enabled"`
+	ResendAPIKey    string   `yaml:"resend_api_key"`
+	FromEmail       string   `yaml:"from_email"`
+	FromName        string   `yaml:"from_name"`
+	ToEmails        []string `yaml:"to_emails"`
+	NotifyOnSuccess bool     `yaml:"notify_on_success"`
+	NotifyOnFailure bool     `yaml:"notify_on_failure"`
+	NotifyOnExpiry  bool     `yaml:"notify_on_expiry"`
+}
+
 type Config struct {
-	Email          string             `yaml:"email"`
-	Domains        []providers.Domain `yaml:"domains"`
-	CertDir        string             `yaml:"cert_dir"`
-	AccountDir     string             `yaml:"account_dir"`
-	PostRenewHooks []string           `yaml:"post_renew_hooks"`
-	RenewBefore    int                `yaml:"renew_before"` // 证书到期前多少天续期
+	Email             string                   `yaml:"email"`
+	Domains           []providers.Domain       `yaml:"domains"`
+	CertDir           string                   `yaml:"cert_dir"`
+	AccountDir        string                   `yaml:"account_dir"`
+	PostRenewHooks    []string                 `yaml:"post_renew_hooks"`
+	RenewBefore       int                      `yaml:"renew_before"` // 证书到期前多少天续期
+	EmailNotification *EmailNotificationConfig `yaml:"email_notification"`
 }
 
 type MyUser struct {
@@ -103,7 +116,7 @@ func certNeedRenew(certPath string) (time.Duration, time.Time, error) {
 	return remain, cert.NotAfter, nil
 }
 
-func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks []string, renewBeforeDays int) error {
+func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks []string, renewBeforeDays int, emailService *notification.EmailService) error {
 	provider, err := providers.GetDNSProvider(domain)
 	if err != nil {
 		return err
@@ -140,14 +153,57 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 		}
 		certs, err := client.Certificate.Obtain(request)
 		if err != nil {
+			// 发送失败通知
+			if emailService != nil && emailService.IsEnabled() {
+				notificationData := notification.NotificationData{
+					Domains:   domain.Names,
+					Success:   false,
+					Error:     err.Error(),
+					Timestamp: time.Now(),
+				}
+				if emailErr := emailService.SendFailureNotification(notificationData); emailErr != nil {
+					log.Printf("[警告] 邮件通知发送失败: %v", emailErr)
+				}
+			}
 			return err
 		}
 		_ = os.WriteFile(certPath, certs.Certificate, 0600)
 		_ = os.WriteFile(keyPath, certs.PrivateKey, 0600)
 		log.Printf("证书 %v 已更新\n", domain.Names)
 		runPostRenewHooks(hooks)
+
+		// 获取新证书信息并发送成功通知
+		if emailService != nil && emailService.IsEnabled() {
+			newRemain, newNotAfter, _ := certNeedRenew(certPath)
+			notificationData := notification.NotificationData{
+				Domains:   domain.Names,
+				Success:   true,
+				Timestamp: time.Now(),
+			}
+			if newRemain > 0 {
+				notificationData.CertExpiry = &newNotAfter
+				notificationData.Remaining = &newRemain
+			}
+			if emailErr := emailService.SendSuccessNotification(notificationData); emailErr != nil {
+				log.Printf("[警告] 邮件通知发送失败: %v", emailErr)
+			}
+		}
 	} else {
 		log.Printf("证书 %v 有效，无需续期，剩余 %v，到期时间 %v\n", domain.Names, remain, notAfter.Format("2006-01-02 15:04:05"))
+
+		// 检查是否需要发送即将到期警告（可选功能）
+		if emailService != nil && emailService.IsEnabled() && remain < time.Duration(renewBeforeDays+7)*24*time.Hour {
+			notificationData := notification.NotificationData{
+				Domains:    domain.Names,
+				Success:    true,
+				Timestamp:  time.Now(),
+				CertExpiry: &notAfter,
+				Remaining:  &remain,
+			}
+			if emailErr := emailService.SendExpiryWarningNotification(notificationData); emailErr != nil {
+				log.Printf("[警告] 即将到期邮件通知发送失败: %v", emailErr)
+			}
+		}
 	}
 	return nil
 }
@@ -191,12 +247,27 @@ func main() {
 	if err != nil {
 		log.Fatalf("[致命] 账户初始化失败: %v\n请检查邮箱配置和账户目录权限。", err)
 	}
+	// 初始化邮件服务
+	var emailService *notification.EmailService
+	if cfg.EmailNotification != nil && cfg.EmailNotification.Enabled {
+		emailService = notification.NewEmailService(
+			cfg.EmailNotification.ResendAPIKey,
+			cfg.EmailNotification.FromEmail,
+			cfg.EmailNotification.FromName,
+			cfg.EmailNotification.ToEmails,
+			cfg.EmailNotification.Enabled,
+		)
+		log.Printf("邮件通知服务已启用，收件人: %v", cfg.EmailNotification.ToEmails)
+	} else {
+		log.Printf("邮件通知服务未启用")
+	}
+
 	renewBefore := cfg.RenewBefore
 	if renewBefore <= 0 {
 		renewBefore = renewBeforeDefault
 	}
 	for _, d := range cfg.Domains {
-		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, renewBefore); err != nil {
+		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, renewBefore, emailService); err != nil {
 			log.Printf("[错误] 域名 %v 证书处理失败: %v\n建议检查 DNS 配置、Provider 凭证和网络连通性。", d.Names, err)
 		}
 	}

@@ -6,6 +6,7 @@ toolchain go1.23.10
 
 require (
 	github.com/go-acme/lego/v4 v4.23.1
+	github.com/resend/resend-go/v2 v2.11.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 

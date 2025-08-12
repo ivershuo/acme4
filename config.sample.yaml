@@ -24,3 +24,17 @@ renew_before: 30 # 证书到期前多少天开始续期，默认30天
 post_renew_hooks:
   - "nginx -s reload"
   # - "systemctl reload haproxy"
+
+# 邮件通知配置（可选）
+email_notification:
+  enabled: true
+  resend_api_key: "re_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  from_email: "acme4@yourdomain.com" # 必须是已验证域名的邮箱
+  from_name: "ACME4 Certificate Manager"
+  to_emails:
+    - "admin@yourdomain.com"
+    - "ops@yourdomain.com"
+  # 通知类型配置
+  notify_on_success: true # 证书续期成功时发送通知
+  notify_on_failure: true # 证书续期失败时发送通知
+  notify_on_expiry: true # 证书即将到期时发送通知（可选功能）
