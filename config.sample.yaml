@@ -3,7 +3,13 @@ domains:
   - names: ["example.com", "*.example.com"]
     provider: "hurricane"
     credentials:
-      api_key: "HE_API_KEY"
+      # Hurricane Electric expects the same format as HURRICANE_TOKENS:
+      # a comma-separated key=value map where the key is the domain or full hostname.
+      # Common case:
+      # api_key: "example.com=HE_API_KEY"
+      # If you need a record-specific override, use the full hostname:
+      # api_key: "example.com=HE_API_KEY,_acme-challenge.example.com=HE_RECORD_TOKEN"
+      api_key: "example.com=HE_API_KEY"
   - names: ["example.net"]
     provider: "cloudflare"
     credentials:
@@ -21,6 +27,9 @@ domains:
 cert_dir: "./certs"
 account_dir: "./accounts"
 renew_before: 30 # 证书到期前多少天开始续期，默认30天
+dns_resolvers:
+  - "8.8.8.8"   # 可选，指定 DNS 检测解析器；未指定则使用系统默认
+  - "1.1.1.1"
 post_renew_hooks:
   - "nginx -s reload"
   # - "systemctl reload haproxy"

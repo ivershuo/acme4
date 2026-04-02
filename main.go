@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-acme/lego/v4/certificate"
@@ -43,6 +44,7 @@ type Config struct {
 	AccountDir        string                   `yaml:"account_dir"`
 	PostRenewHooks    []string                 `yaml:"post_renew_hooks"`
 	RenewBefore       int                      `yaml:"renew_before"` // 证书到期前多少天续期
+	DNSResolvers      []string                 `yaml:"dns_resolvers"`
 	EmailNotification *EmailNotificationConfig `yaml:"email_notification"`
 }
 
@@ -240,6 +242,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("[致命] 配置文件加载失败: %v\n请检查 config.yaml 路径和内容是否正确。", err)
 	}
+	// 如果配置中指定了 DNS 解析器，则仅在此时设置为生效
+	if len(cfg.DNSResolvers) > 0 {
+		var normalized []string
+		for _, r := range cfg.DNSResolvers {
+			rr := strings.TrimSpace(r)
+			if rr == "" {
+				continue
+			}
+			if !strings.Contains(rr, ":") {
+				rr = rr + ":53"
+			}
+			normalized = append(normalized, rr)
+		}
+		if len(normalized) > 0 {
+			os.Setenv("LEGO_DNS_RESOLVERS", strings.Join(normalized, ","))
+			log.Printf("使用自定义 DNS 检测解析器: %s", strings.Join(cfg.DNSResolvers, ", "))
+		}
+	}
 	_ = ensureDir(cfg.CertDir)
 	_ = ensureDir(cfg.AccountDir)
 
@@ -266,10 +286,38 @@ func main() {
 	if renewBefore <= 0 {
 		renewBefore = renewBeforeDefault
 	}
+
+	// 分离 Hurricane Electric 和其他 provider 的域名
+	var hurricaneDomains []providers.Domain
+	var otherDomains []providers.Domain
+
 	for _, d := range cfg.Domains {
+		if d.Provider == "hurricane" {
+			hurricaneDomains = append(hurricaneDomains, d)
+		} else {
+			otherDomains = append(otherDomains, d)
+		}
+	}
+
+	// 先处理其他 provider 的域名
+	for _, d := range otherDomains {
 		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, renewBefore, emailService); err != nil {
 			log.Printf("[错误] 域名 %v 证书处理失败: %v\n建议检查 DNS 配置、Provider 凭证和网络连通性。", d.Names, err)
 		}
+	}
+
+	// 然后按顺序处理 Hurricane Electric 的域名，避免并发冲突
+	log.Printf("[Hurricane Electric] 开始顺序处理 %d 个 Hurricane Electric 域名", len(hurricaneDomains))
+	for i, d := range hurricaneDomains {
+		log.Printf("[Hurricane Electric] 处理第 %d/%d 个域名: %v", i+1, len(hurricaneDomains), d.Names)
+		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, renewBefore, emailService); err != nil {
+			log.Printf("[错误] Hurricane Electric 域名 %v 证书处理失败: %v\n建议检查 DNS 配置、Provider 凭证和网络连通性。", d.Names, err)
+		}
+		// 在 Hurricane Electric 域名之间添加延迟，确保 DNS 记录完全生效
+		// if i < len(hurricaneDomains)-1 {
+		// 	log.Printf("[Hurricane Electric] 等待 10 秒后处理下一个域名...")
+		// 	time.Sleep(10 * time.Second)
+		// }
 	}
 	log.Printf("程序结束: %s", time.Now().Format("2006-01-02 15:04:05"))
 }

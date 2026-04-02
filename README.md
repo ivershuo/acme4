@@ -19,7 +19,7 @@ domains:
   - names: ["example.com", "*.example.com"]
     provider: "hurricane"
     credentials:
-      api_key: "HE_API_KEY"
+      api_key: "example.com=HE_API_KEY"
   - names: ["example.net"]
     provider: "cloudflare"
     credentials:
@@ -43,6 +43,26 @@ email_notification:
   notify_on_success: true
   notify_on_failure: true
   notify_on_expiry: true
+```
+
+Hurricane Electric 的 `credentials.api_key` 不是单个 token，而是兼容 `HURRICANE_TOKENS` 的 `key=value[,key=value...]` 映射串：
+
+```yaml
+domains:
+  - names: ["example.com", "*.example.com"]
+    provider: "hurricane"
+    credentials:
+      api_key: "example.com=HE_API_KEY"
+```
+
+如需给特定记录覆盖 token，可以使用完整主机名作为 key：
+
+```yaml
+domains:
+  - names: ["example.com", "*.example.com"]
+    provider: "hurricane"
+    credentials:
+      api_key: "example.com=HE_API_KEY,_acme-challenge.example.com=HE_RECORD_TOKEN"
 ```
 
 ### 2. 运行

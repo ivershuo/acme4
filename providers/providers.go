@@ -2,9 +2,11 @@ package providers
 
 import (
 	"fmt"
+	"log"
+	"time"
+
 	"github.com/go-acme/lego/v4/challenge"
 	"github.com/go-acme/lego/v4/challenge/dns01"
-	"log"
 )
 
 type Domain struct {
@@ -40,11 +42,36 @@ func (l *LoggingDNSProvider) CleanUp(domain, token, keyAuth string) error {
 	return l.wrapped.CleanUp(domain, token, keyAuth)
 }
 
-func (l *LoggingDNSProvider) Timeout() (timeout, interval int) {
-	if t, ok := l.wrapped.(interface{ Timeout() (int, int) }); ok {
-		return t.Timeout()
-	}
-	return 120, 2 // default
+type loggingDNSProviderTimeout struct {
+	*LoggingDNSProvider
+	timeoutProvider challenge.ProviderTimeout
+}
+
+func (l *loggingDNSProviderTimeout) Timeout() (timeout, interval time.Duration) {
+	return l.timeoutProvider.Timeout()
+}
+
+type loggingDNSProviderSequential struct {
+	*LoggingDNSProvider
+	sequentialProvider interface{ Sequential() time.Duration }
+}
+
+func (l *loggingDNSProviderSequential) Sequential() time.Duration {
+	return l.sequentialProvider.Sequential()
+}
+
+type loggingDNSProviderTimeoutSequential struct {
+	*LoggingDNSProvider
+	timeoutProvider    challenge.ProviderTimeout
+	sequentialProvider interface{ Sequential() time.Duration }
+}
+
+func (l *loggingDNSProviderTimeoutSequential) Timeout() (timeout, interval time.Duration) {
+	return l.timeoutProvider.Timeout()
+}
+
+func (l *loggingDNSProviderTimeoutSequential) Sequential() time.Duration {
+	return l.sequentialProvider.Sequential()
 }
 
 // GetDNSProvider gets the DNS provider by name, and wraps it with LoggingDNSProvider
@@ -57,5 +84,29 @@ func GetDNSProvider(domain Domain) (challenge.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &LoggingDNSProvider{wrapped: prov, domain: domain.Names[0]}, nil
+
+	loggingProvider := &LoggingDNSProvider{wrapped: prov, domain: domain.Names[0]}
+	timeoutProvider, hasTimeout := prov.(challenge.ProviderTimeout)
+	sequentialProvider, hasSequential := prov.(interface{ Sequential() time.Duration })
+
+	switch {
+	case hasTimeout && hasSequential:
+		return &loggingDNSProviderTimeoutSequential{
+			LoggingDNSProvider: loggingProvider,
+			timeoutProvider:    timeoutProvider,
+			sequentialProvider: sequentialProvider,
+		}, nil
+	case hasTimeout:
+		return &loggingDNSProviderTimeout{
+			LoggingDNSProvider: loggingProvider,
+			timeoutProvider:    timeoutProvider,
+		}, nil
+	case hasSequential:
+		return &loggingDNSProviderSequential{
+			LoggingDNSProvider: loggingProvider,
+			sequentialProvider: sequentialProvider,
+		}, nil
+	default:
+		return loggingProvider, nil
+	}
 }

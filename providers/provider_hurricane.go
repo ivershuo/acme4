@@ -3,8 +3,9 @@ package providers
 import (
 	"os"
 
+	"acme4/providers/hurricane"
+
 	"github.com/go-acme/lego/v4/challenge"
-	"github.com/go-acme/lego/v4/providers/dns/hurricane"
 )
 
 func init() {
