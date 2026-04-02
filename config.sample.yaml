@@ -32,6 +32,8 @@ dns_resolvers:
   - "1.1.1.1"
 post_renew_hooks:
   - "nginx -s reload"
+  # 内置 hook 示例：上传当前证书到腾讯云 SSL 证书服务
+  # - "./hooks/tencent-upload-cert/tencent-upload-cert --cert {cert_path} --key {key_path} --domain {domain} --secret-id ${TENCENTCLOUD_SECRET_ID} --secret-key ${TENCENTCLOUD_SECRET_KEY}"
   # - "systemctl reload haproxy"
 
 # 邮件通知配置（可选）

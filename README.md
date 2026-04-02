@@ -87,6 +87,7 @@ go build -o acme4
 
 ## 目录结构说明
 - `main.go`        主程序入口
+- `hooks/`         内置续期后 hook 命令
 - `providers/`     所有 DNS Provider 插件（可扩展）
 - `config.sample.yaml` 配置示例
 - `README.md`      项目说明
@@ -110,6 +111,7 @@ func(domain Domain) (challenge.Provider, error)
 
 ## 证书更新后自动操作
 - 在 `config.yaml` 的 `post_renew_hooks` 字段配置 shell 命令，如 `nginx -s reload`。
+- hook 命令支持占位符：`{domain}`、`{cert_path}`、`{key_path}`。
 - 每次证书更新后会自动依次执行这些命令，并将输出写入日志。
 - 日志中会详细记录证书处理、钩子执行的成功与失败，并给出排查建议。
 

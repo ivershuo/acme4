@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -172,7 +173,7 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 		_ = os.WriteFile(certPath, certs.Certificate, 0600)
 		_ = os.WriteFile(keyPath, certs.PrivateKey, 0600)
 		log.Printf("证书 %v 已更新\n", domain.Names)
-		runPostRenewHooks(hooks)
+		runPostRenewHooks(hooks, domain.Names[0], certPath, keyPath)
 
 		// 获取新证书信息并发送成功通知
 		if emailService != nil && emailService.IsEnabled() {
@@ -210,13 +211,36 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 	return nil
 }
 
-func runPostRenewHooks(hooks []string) {
+var hookPlaceholderPattern = regexp.MustCompile(`\{[a-z_]+\}`)
+
+func expandHookCommand(cmdStr, domain, certPath, keyPath string) (string, error) {
+	replacements := strings.NewReplacer(
+		"{domain}", domain,
+		"{cert_path}", certPath,
+		"{key_path}", keyPath,
+	)
+
+	expanded := replacements.Replace(cmdStr)
+	if placeholder := hookPlaceholderPattern.FindString(expanded); placeholder != "" {
+		return "", fmt.Errorf("unsupported hook placeholder: %s", placeholder)
+	}
+
+	return expanded, nil
+}
+
+func runPostRenewHooks(hooks []string, domain, certPath, keyPath string) {
 	for _, cmdStr := range hooks {
-		log.Printf("执行后续命令: %s", cmdStr)
-		cmd := exec.Command("sh", "-c", cmdStr)
+		expanded, err := expandHookCommand(cmdStr, domain, certPath, keyPath)
+		if err != nil {
+			log.Printf("[后续命令失败] 命令模板: %s，错误: %v\n请检查 hook 占位符是否正确。", cmdStr, err)
+			continue
+		}
+
+		log.Printf("执行后续命令: %s", expanded)
+		cmd := exec.Command("sh", "-c", expanded)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			log.Printf("[后续命令失败] 命令: %s，错误: %v，输出: %s\n请检查命令是否可用及相关权限。", cmdStr, err, string(output))
+			log.Printf("[后续命令失败] 命令: %s，错误: %v，输出: %s\n请检查命令是否可用及相关权限。", expanded, err, string(output))
 		} else {
 			log.Printf("后续命令成功，输出: %s", string(output))
 		}
