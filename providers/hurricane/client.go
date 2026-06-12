@@ -41,6 +41,29 @@ type Client struct {
 	credMu      sync.Mutex
 }
 
+type DiagnosticCode string
+
+const (
+	DiagnosticUnknown  DiagnosticCode = "unknown"
+	DiagnosticInterval DiagnosticCode = codeInterval
+	DiagnosticBadAuth  DiagnosticCode = codeBadAuth
+	DiagnosticNoHost   DiagnosticCode = codeNoHost
+)
+
+type DiagnosticError struct {
+	Code     DiagnosticCode
+	Host     string
+	Response string
+	Message  string
+}
+
+func (e *DiagnosticError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
 // NewClient Creates a new Client.
 func NewClient(credentials map[string]string) *Client {
 	return &Client{
@@ -118,16 +141,25 @@ func evaluateBody(body, hostname string) error {
 	case codeBadAgent:
 		return fmt.Errorf("%s: user agent not sent or HTTP method not recognized; open an issue on go-acme/lego on GitHub", body)
 	case codeBadAuth:
-		return fmt.Errorf("%s: wrong authentication token provided for TXT record %s", body, hostname)
+		return diagnosticError(DiagnosticBadAuth, hostname, body, "%s: wrong authentication token provided for TXT record %s", body, hostname)
 	case codeInterval:
-		return fmt.Errorf("%s: TXT records update exceeded API rate limit", body)
+		return diagnosticError(DiagnosticInterval, hostname, body, "%s: TXT records update exceeded API rate limit", body)
 	case codeNoHost:
-		return fmt.Errorf("%s: the record provided does not exist in this account: %s", body, hostname)
+		return diagnosticError(DiagnosticNoHost, hostname, body, "%s: the record provided does not exist in this account: %s", body, hostname)
 	case codeNotFqdn:
 		return fmt.Errorf("%s: the record provided isn't an FQDN: %s", body, hostname)
 	default:
 		// This is basically only server errors.
-		return fmt.Errorf("attempt to change TXT record %s returned %s", hostname, body)
+		return diagnosticError(DiagnosticUnknown, hostname, body, "attempt to change TXT record %s returned %s", hostname, body)
+	}
+}
+
+func diagnosticError(code DiagnosticCode, hostname, response, format string, args ...any) error {
+	return &DiagnosticError{
+		Code:     code,
+		Host:     hostname,
+		Response: response,
+		Message:  fmt.Sprintf(format, args...),
 	}
 }
 

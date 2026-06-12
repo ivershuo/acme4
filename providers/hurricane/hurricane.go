@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -23,6 +24,15 @@ const (
 	EnvPollingInterval    = envNamespace + "POLLING_INTERVAL"
 	EnvHTTPTimeout        = envNamespace + "HTTP_TIMEOUT"
 	EnvSequenceInterval   = envNamespace + "SEQUENCE_INTERVAL"
+	EnvIntervalRetries    = envNamespace + "INTERVAL_RETRIES"
+	EnvIntervalRetryWait  = envNamespace + "INTERVAL_RETRY_WAIT"
+)
+
+const (
+	defaultPropagationTimeout = 300 * time.Second
+	defaultSequenceInterval   = 120 * time.Second
+	defaultIntervalRetries    = 3
+	defaultIntervalRetryWait  = 30 * time.Second
 )
 
 var _ challenge.ProviderTimeout = (*DNSProvider)(nil)
@@ -33,15 +43,19 @@ type Config struct {
 	PropagationTimeout time.Duration
 	PollingInterval    time.Duration
 	SequenceInterval   time.Duration
+	IntervalRetries    int
+	IntervalRetryWait  time.Duration
 	HTTPClient         *http.Client
 }
 
 // NewDefaultConfig returns a default configuration for the DNSProvider.
 func NewDefaultConfig() *Config {
 	return &Config{
-		PropagationTimeout: env.GetOrDefaultSecond(EnvPropagationTimeout, 300*time.Second),
+		PropagationTimeout: env.GetOrDefaultSecond(EnvPropagationTimeout, defaultPropagationTimeout),
 		PollingInterval:    env.GetOrDefaultSecond(EnvPollingInterval, dns01.DefaultPollingInterval),
-		SequenceInterval:   env.GetOrDefaultSecond(EnvSequenceInterval, dns01.DefaultPropagationTimeout),
+		SequenceInterval:   env.GetOrDefaultSecond(EnvSequenceInterval, defaultSequenceInterval),
+		IntervalRetries:    env.GetOrDefaultInt(EnvIntervalRetries, defaultIntervalRetries),
+		IntervalRetryWait:  env.GetOrDefaultSecond(EnvIntervalRetryWait, defaultIntervalRetryWait),
 		HTTPClient: &http.Client{
 			Timeout: env.GetOrDefaultSecond(EnvHTTPTimeout, 30*time.Second),
 		},
@@ -84,6 +98,14 @@ func NewDNSProviderConfig(config *Config) (*DNSProvider, error) {
 		return nil, errors.New("hurricane: credentials missing")
 	}
 
+	if config.IntervalRetries < 0 {
+		config.IntervalRetries = 0
+	}
+
+	if config.IntervalRetryWait < 0 {
+		config.IntervalRetryWait = 0
+	}
+
 	client := NewClient(config.Credentials)
 
 	if config.HTTPClient != nil {
@@ -103,11 +125,15 @@ func (d *DNSProvider) Present(domain, _, keyAuth string) error {
 	unlock := d.lockHostname(hostname)
 	defer unlock()
 
-	err := d.client.UpdateTxtRecord(context.Background(), hostname, info.Value)
+	start := time.Now()
+	log.Printf("[Hurricane Electric] action=present domain=%s fqdn=%s value=%s", domain, info.EffectiveFQDN, info.Value)
+	err := d.updateTxtRecord(context.Background(), "present", domain, info.EffectiveFQDN, hostname, info.Value)
 	if err != nil {
+		log.Printf("[Hurricane Electric] action=present domain=%s fqdn=%s duration=%s result=error diagnostic=%s error=%v", domain, info.EffectiveFQDN, time.Since(start), DiagnosticCodeFromError(err), err)
 		return fmt.Errorf("hurricane: %w", err)
 	}
 
+	log.Printf("[Hurricane Electric] action=present domain=%s fqdn=%s duration=%s result=ok", domain, info.EffectiveFQDN, time.Since(start))
 	return nil
 }
 
@@ -119,11 +145,15 @@ func (d *DNSProvider) CleanUp(domain, _, keyAuth string) error {
 	unlock := d.lockHostname(hostname)
 	defer unlock()
 
-	err := d.client.UpdateTxtRecord(context.Background(), hostname, ".")
+	start := time.Now()
+	log.Printf("[Hurricane Electric] action=cleanup domain=%s fqdn=%s value=.", domain, info.EffectiveFQDN)
+	err := d.updateTxtRecord(context.Background(), "cleanup", domain, info.EffectiveFQDN, hostname, ".")
 	if err != nil {
+		log.Printf("[Hurricane Electric] action=cleanup domain=%s fqdn=%s duration=%s result=error diagnostic=%s error=%v", domain, info.EffectiveFQDN, time.Since(start), DiagnosticCodeFromError(err), err)
 		return fmt.Errorf("hurricane: %w", err)
 	}
 
+	log.Printf("[Hurricane Electric] action=cleanup domain=%s fqdn=%s duration=%s result=ok", domain, info.EffectiveFQDN, time.Since(start))
 	return nil
 }
 
@@ -145,4 +175,52 @@ func (d *DNSProvider) lockHostname(hostname string) func() {
 	mu.Lock()
 
 	return mu.Unlock
+}
+
+func (d *DNSProvider) updateTxtRecord(ctx context.Context, action, domain, fqdn, hostname, value string) error {
+	var err error
+	for attempt := 0; attempt <= d.config.IntervalRetries; attempt++ {
+		if attempt > 0 {
+			wait := d.intervalRetryWait(attempt)
+			log.Printf("[Hurricane Electric] action=%s domain=%s fqdn=%s retry=%d wait=%s reason=interval", action, domain, fqdn, attempt, wait)
+			if sleepErr := sleepContext(ctx, wait); sleepErr != nil {
+				return sleepErr
+			}
+		}
+
+		err = d.client.UpdateTxtRecord(ctx, hostname, value)
+		if DiagnosticCodeFromError(err) != DiagnosticInterval {
+			return err
+		}
+	}
+
+	return err
+}
+
+func (d *DNSProvider) intervalRetryWait(attempt int) time.Duration {
+	wait := d.config.IntervalRetryWait
+	for i := 1; i < attempt; i++ {
+		wait *= 2
+	}
+	return wait
+}
+
+func sleepContext(ctx context.Context, wait time.Duration) error {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func DiagnosticCodeFromError(err error) DiagnosticCode {
+	var diagnostic *DiagnosticError
+	if errors.As(err, &diagnostic) {
+		return diagnostic.Code
+	}
+	return ""
 }

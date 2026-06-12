@@ -173,3 +173,90 @@ func TestDNSProviderSameHostnameLifecycleOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestDNSProviderRetriesIntervalResponses(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+
+	client := newTestHTTPClient(func(r *http.Request) (*http.Response, error) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+
+		mu.Lock()
+		attempts++
+		body := "good"
+		if attempts == 1 {
+			body = "interval TXT records update exceeded API rate limit"
+		}
+		mu.Unlock()
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	provider, err := NewDNSProviderConfig(&Config{
+		Credentials:       map[string]string{"example.com": "token"},
+		HTTPClient:        client,
+		IntervalRetries:   1,
+		IntervalRetryWait: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewDNSProviderConfig(): %v", err)
+	}
+
+	if err := provider.Present("example.com", "", "key-auth"); err != nil {
+		t.Fatalf("Present() error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+}
+
+func TestDNSProviderDoesNotRetryBadAuthResponses(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+
+	client := newTestHTTPClient(func(r *http.Request) (*http.Response, error) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("badauth")),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	provider, err := NewDNSProviderConfig(&Config{
+		Credentials:       map[string]string{"example.com": "token"},
+		HTTPClient:        client,
+		IntervalRetries:   3,
+		IntervalRetryWait: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewDNSProviderConfig(): %v", err)
+	}
+
+	err = provider.Present("example.com", "", "key-auth")
+	if DiagnosticCodeFromError(err) != DiagnosticBadAuth {
+		t.Fatalf("Present() diagnostic = %q, want %q; err=%v", DiagnosticCodeFromError(err), DiagnosticBadAuth, err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
+	}
+}

@@ -10,6 +10,11 @@ domains:
       # If you need a record-specific override, use the full hostname:
       # api_key: "example.com=HE_API_KEY,_acme-challenge.example.com=HE_RECORD_TOKEN"
       api_key: "example.com=HE_API_KEY"
+    # Hurricane 可用环境变量调优：
+    # HURRICANE_PROPAGATION_TIMEOUT=300
+    # HURRICANE_SEQUENCE_INTERVAL=120
+    # HURRICANE_INTERVAL_RETRIES=3
+    # HURRICANE_INTERVAL_RETRY_WAIT=30
   - names: ["example.net"]
     provider: "cloudflare"
     credentials:

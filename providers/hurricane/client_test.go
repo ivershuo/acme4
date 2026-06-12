@@ -2,6 +2,7 @@ package hurricane
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -13,6 +14,53 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestEvaluateBodyDiagnosticErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		code DiagnosticCode
+	}{
+		{
+			name: "interval",
+			body: "interval TXT records update exceeded API rate limit",
+			code: DiagnosticInterval,
+		},
+		{
+			name: "badauth",
+			body: "badauth",
+			code: DiagnosticBadAuth,
+		},
+		{
+			name: "nohost",
+			body: "nohost",
+			code: DiagnosticNoHost,
+		},
+		{
+			name: "unknown",
+			body: "server exploded",
+			code: DiagnosticUnknown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := evaluateBody(tt.body, "_acme-challenge.example.com")
+			if err == nil {
+				t.Fatal("evaluateBody() expected error")
+			}
+
+			var diagnostic *DiagnosticError
+			if !errors.As(err, &diagnostic) {
+				t.Fatalf("evaluateBody() error should be DiagnosticError, got %T", err)
+			}
+
+			if diagnostic.Code != tt.code {
+				t.Fatalf("diagnostic code = %q, want %q", diagnostic.Code, tt.code)
+			}
+		})
+	}
 }
 
 func newTestHTTPClient(fn roundTripFunc) *http.Client {

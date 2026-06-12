@@ -65,6 +65,15 @@ domains:
       api_key: "example.com=HE_API_KEY,_acme-challenge.example.com=HE_RECORD_TOKEN"
 ```
 
+Hurricane Electric 的动态 DNS TXT 更新更适合顺序验证。程序会对 Hurricane provider 使用更保守的默认值：
+
+- `HURRICANE_PROPAGATION_TIMEOUT`: 默认 `300` 秒。
+- `HURRICANE_SEQUENCE_INTERVAL`: 默认 `120` 秒，用于同一证书内多个 DNS-01 challenge 之间的等待。
+- `HURRICANE_INTERVAL_RETRIES`: 默认 `3` 次，只在 Hurricane 返回 `interval` 限流时重试。
+- `HURRICANE_INTERVAL_RETRY_WAIT`: 默认 `30` 秒，限流重试初始等待时间，后续按 2 倍退避。
+
+如果 `example.com` 和 `*.example.com` 共享 `_acme-challenge.example.com`，程序会打印风险提示，并按 lego 的顺序验证流程逐个写入、验证和清理 TXT 记录。
+
 ### 2. 运行
 
 ```sh

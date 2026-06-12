@@ -23,6 +23,7 @@ import (
 
 	"acme4/notification"
 	"acme4/providers"
+	"acme4/providers/hurricane"
 )
 
 const renewBeforeDefault = 30 // 默认提前30天续期
@@ -211,6 +212,50 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 	return nil
 }
 
+func hurricaneFailureAdvice(err error, names []string) string {
+	if err == nil {
+		return ""
+	}
+
+	switch hurricane.DiagnosticCodeFromError(err) {
+	case hurricane.DiagnosticInterval:
+		return "Hurricane Electric 返回 interval，表示动态 DNS 更新触发限流；建议拉长 HURRICANE_SEQUENCE_INTERVAL、降低续期频率，或避免短时间内重复清理/写入同一 TXT 记录。"
+	case hurricane.DiagnosticBadAuth:
+		return "Hurricane Electric 返回 badauth，表示 TXT 动态更新 token 不匹配；请检查 credentials.api_key/HURRICANE_TOKENS 中域名或完整主机名对应的 token。"
+	case hurricane.DiagnosticNoHost:
+		return "Hurricane Electric 返回 nohost，表示该 TXT 记录未在账号中作为动态记录存在；请确认 _acme-challenge 记录已创建并启用 dynamic DNS。"
+	}
+
+	errText := err.Error()
+	if strings.Contains(errText, "propagation") || strings.Contains(errText, "DNS record") {
+		return fmt.Sprintf("DNS-01 传播检查失败；请确认挑战 TXT 已在权威 DNS 可见。当前域名 %v 可能共享同一个 _acme-challenge 记录，Hurricane 会顺序写入/清理，失败可能来自上一轮清理值 `.` 或新值尚未传播完成。", names)
+	}
+
+	return ""
+}
+
+func logHurricaneSharedChallengeWarnings(domains []providers.Domain) {
+	for _, d := range domains {
+		hosts := map[string][]string{}
+		for _, name := range d.Names {
+			host := hurricaneChallengeHost(name)
+			hosts[host] = append(hosts[host], name)
+		}
+
+		for host, names := range hosts {
+			if len(names) < 2 {
+				continue
+			}
+			log.Printf("[Hurricane Electric] 风险提示: 域名 %v 共享 TXT 记录 %s。Hurricane 动态 DNS 不能像常规 DNS API 一样维护同名多 TXT 值，lego 会顺序写入、验证、清理；如果续期失败，优先检查动态更新传播延迟、interval 限流、token 和记录是否启用 dynamic DNS。", names, host)
+		}
+	}
+}
+
+func hurricaneChallengeHost(name string) string {
+	base := strings.TrimPrefix(strings.TrimSuffix(name, "."), "*.")
+	return "_acme-challenge." + base
+}
+
 var hookPlaceholderPattern = regexp.MustCompile(`\{[a-z_]+\}`)
 
 func expandHookCommand(cmdStr, domain, certPath, keyPath string) (string, error) {
@@ -322,6 +367,7 @@ func main() {
 			otherDomains = append(otherDomains, d)
 		}
 	}
+	logHurricaneSharedChallengeWarnings(hurricaneDomains)
 
 	// 先处理其他 provider 的域名
 	for _, d := range otherDomains {
@@ -336,6 +382,9 @@ func main() {
 		log.Printf("[Hurricane Electric] 处理第 %d/%d 个域名: %v", i+1, len(hurricaneDomains), d.Names)
 		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, renewBefore, emailService); err != nil {
 			log.Printf("[错误] Hurricane Electric 域名 %v 证书处理失败: %v\n建议检查 DNS 配置、Provider 凭证和网络连通性。", d.Names, err)
+			if advice := hurricaneFailureAdvice(err, d.Names); advice != "" {
+				log.Printf("[Hurricane Electric] 诊断建议: %s", advice)
+			}
 		}
 		// 在 Hurricane Electric 域名之间添加延迟，确保 DNS 记录完全生效
 		// if i < len(hurricaneDomains)-1 {

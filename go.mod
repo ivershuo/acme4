@@ -7,6 +7,7 @@ toolchain go1.24.4
 require (
 	github.com/go-acme/lego/v4 v4.28.1
 	github.com/resend/resend-go/v2 v2.11.0
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.1.48
 	golang.org/x/time v0.14.0
 	gopkg.in/yaml.v2 v2.4.0
 )
@@ -19,7 +20,6 @@ require (
 	github.com/miekg/dns v1.1.68 // indirect
 	github.com/nrdcg/porkbun v0.4.0 // indirect
 	github.com/rogpeppe/go-internal v1.8.1 // indirect
-	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.1.48 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/mod v0.28.0 // indirect
 	golang.org/x/net v0.46.0 // indirect
