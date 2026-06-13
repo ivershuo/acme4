@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,9 +35,9 @@ type EmailNotificationConfig struct {
 	FromEmail       string   `yaml:"from_email"`
 	FromName        string   `yaml:"from_name"`
 	ToEmails        []string `yaml:"to_emails"`
-	NotifyOnSuccess bool     `yaml:"notify_on_success"`
-	NotifyOnFailure bool     `yaml:"notify_on_failure"`
-	NotifyOnExpiry  bool     `yaml:"notify_on_expiry"`
+	NotifyOnSuccess *bool    `yaml:"notify_on_success"`
+	NotifyOnFailure *bool    `yaml:"notify_on_failure"`
+	NotifyOnExpiry  *bool    `yaml:"notify_on_expiry"`
 }
 
 type Config struct {
@@ -74,6 +75,13 @@ func loadConfig(path string) (*Config, error) {
 	var cfg Config
 	err = yaml.Unmarshal(data, &cfg)
 	return &cfg, err
+}
+
+func boolDefault(value *bool, defaultValue bool) bool {
+	if value == nil {
+		return defaultValue
+	}
+	return *value
 }
 
 func ensureDir(dir string) error {
@@ -159,11 +167,16 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 		if err != nil {
 			// 发送失败通知
 			if emailService != nil && emailService.IsEnabled() {
+				advice := ""
+				if domain.Provider == "hurricane" {
+					advice = hurricaneFailureAdvice(err, domain.Names)
+				}
 				notificationData := notification.NotificationData{
 					Domains:   domain.Names,
 					Success:   false,
 					Error:     err.Error(),
 					Timestamp: time.Now(),
+					Advice:    advice,
 				}
 				if emailErr := emailService.SendFailureNotification(notificationData); emailErr != nil {
 					log.Printf("[警告] 邮件通知发送失败: %v", emailErr)
@@ -174,15 +187,16 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 		_ = os.WriteFile(certPath, certs.Certificate, 0600)
 		_ = os.WriteFile(keyPath, certs.PrivateKey, 0600)
 		log.Printf("证书 %v 已更新\n", domain.Names)
-		runPostRenewHooks(hooks, domain.Names[0], certPath, keyPath)
+		hookSummary := runPostRenewHooks(hooks, domain.Names[0], certPath, keyPath)
 
 		// 获取新证书信息并发送成功通知
 		if emailService != nil && emailService.IsEnabled() {
 			newRemain, newNotAfter, _ := certNeedRenew(certPath)
 			notificationData := notification.NotificationData{
-				Domains:   domain.Names,
-				Success:   true,
-				Timestamp: time.Now(),
+				Domains:     domain.Names,
+				Success:     true,
+				Timestamp:   time.Now(),
+				HookSummary: hookSummary,
 			}
 			if newRemain > 0 {
 				notificationData.CertExpiry = &newNotAfter
@@ -196,7 +210,7 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 		log.Printf("证书 %v 有效，无需续期，剩余 %v，到期时间 %v\n", domain.Names, remain, notAfter.Format("2006-01-02 15:04:05"))
 
 		// 检查是否需要发送即将到期警告（可选功能）
-		if emailService != nil && emailService.IsEnabled() && remain < time.Duration(renewBeforeDays+7)*24*time.Hour {
+		if emailService != nil && emailService.IsEnabled() && shouldSendExpiryWarning(remain, renewBeforeDays) {
 			notificationData := notification.NotificationData{
 				Domains:    domain.Names,
 				Success:    true,
@@ -210,6 +224,21 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 		}
 	}
 	return nil
+}
+
+func shouldSendExpiryWarning(remain time.Duration, renewBeforeDays int) bool {
+	if remain <= 0 {
+		return true
+	}
+
+	remainingDays := int(math.Ceil(remain.Hours() / 24))
+	for _, day := range []int{renewBeforeDays + 7, renewBeforeDays + 3, renewBeforeDays + 1} {
+		if remainingDays == day {
+			return true
+		}
+	}
+
+	return false
 }
 
 func hurricaneFailureAdvice(err error, names []string) string {
@@ -273,11 +302,18 @@ func expandHookCommand(cmdStr, domain, certPath, keyPath string) (string, error)
 	return expanded, nil
 }
 
-func runPostRenewHooks(hooks []string, domain, certPath, keyPath string) {
+func runPostRenewHooks(hooks []string, domain, certPath, keyPath string) string {
+	if len(hooks) == 0 {
+		return "未配置后续命令；证书文件已更新。"
+	}
+
+	successCount := 0
+	failureCount := 0
 	for _, cmdStr := range hooks {
 		expanded, err := expandHookCommand(cmdStr, domain, certPath, keyPath)
 		if err != nil {
 			log.Printf("[后续命令失败] 命令模板: %s，错误: %v\n请检查 hook 占位符是否正确。", cmdStr, err)
+			failureCount++
 			continue
 		}
 
@@ -286,10 +322,18 @@ func runPostRenewHooks(hooks []string, domain, certPath, keyPath string) {
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			log.Printf("[后续命令失败] 命令: %s，错误: %v，输出: %s\n请检查命令是否可用及相关权限。", expanded, err, string(output))
+			failureCount++
 		} else {
 			log.Printf("后续命令成功，输出: %s", string(output))
+			successCount++
 		}
 	}
+
+	if failureCount > 0 {
+		return fmt.Sprintf("后续命令执行完成：成功 %d 个，失败 %d 个；请查看日志确认服务是否已加载新证书。", successCount, failureCount)
+	}
+
+	return fmt.Sprintf("后续命令执行完成：成功 %d 个，失败 0 个。", successCount)
 }
 
 func main() {
@@ -339,14 +383,24 @@ func main() {
 	// 初始化邮件服务
 	var emailService *notification.EmailService
 	if cfg.EmailNotification != nil && cfg.EmailNotification.Enabled {
+		notifyOnSuccess := boolDefault(cfg.EmailNotification.NotifyOnSuccess, true)
+		notifyOnFailure := boolDefault(cfg.EmailNotification.NotifyOnFailure, true)
+		notifyOnExpiry := boolDefault(cfg.EmailNotification.NotifyOnExpiry, true)
 		emailService = notification.NewEmailService(
 			cfg.EmailNotification.ResendAPIKey,
 			cfg.EmailNotification.FromEmail,
 			cfg.EmailNotification.FromName,
 			cfg.EmailNotification.ToEmails,
 			cfg.EmailNotification.Enabled,
+			notifyOnSuccess,
+			notifyOnFailure,
+			notifyOnExpiry,
 		)
-		log.Printf("邮件通知服务已启用，收件人: %v", cfg.EmailNotification.ToEmails)
+		if emailService.IsEnabled() {
+			log.Printf("邮件通知服务已启用，收件人: %v，成功通知: %t，失败通知: %t，到期提醒: %t", cfg.EmailNotification.ToEmails, notifyOnSuccess, notifyOnFailure, notifyOnExpiry)
+		} else {
+			log.Printf("邮件通知配置已启用但缺少 Resend API Key，邮件通知已禁用")
+		}
 	} else {
 		log.Printf("邮件通知服务未启用")
 	}

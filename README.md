@@ -126,7 +126,7 @@ func(domain Domain) (challenge.Provider, error)
 
 ## 邮件通知功能
 - 支持通过 [Resend](https://resend.com/) 服务发送邮件通知
-- 在证书续期成功、失败或即将到期时自动发送邮件
+- 在证书续期成功、失败或即将进入续期窗口时自动发送邮件
 - 需要先在 Resend 注册账户并获取 API Key
 - 需要验证发件邮箱的域名
 
@@ -149,6 +149,8 @@ email_notification:
   notify_on_failure: true                         # 续期失败通知
   notify_on_expiry: true                          # 即将到期通知
 ```
+
+`notify_on_success`、`notify_on_failure`、`notify_on_expiry` 未配置时默认启用，显式设置为 `false` 可关闭对应通知。到期提醒会在进入续期窗口前 7、3、1 天发送，避免每天重复提醒；邮件中的剩余有效期会按远近展示为天、小时或分钟。
 
 ## 错误处理与日志
 - 所有关键步骤均有详细日志输出，便于排查问题。
