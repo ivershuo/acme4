@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,25 +55,6 @@ func (w *limitedBuffer) String() string {
 		return w.buf.String() + "\n[输出已截断]"
 	}
 	return w.buf.String()
-}
-
-func runStructuredHooks(hooks []HookConfig, domain, certPath, keyPath string) (string, error) {
-	if len(hooks) == 0 {
-		return "未配置后续命令；证书文件已更新。", nil
-	}
-	successes := 0
-	var failures []error
-	for _, hook := range hooks {
-		if err := runStructuredHook(hook, domain, certPath, keyPath); err != nil {
-			failures = append(failures, fmt.Errorf("hook %s: %w", hook.ID, err))
-			logHookResult(hook.ID, "failed", err)
-			continue
-		}
-		successes++
-		logHookResult(hook.ID, "success", nil)
-	}
-	summary := fmt.Sprintf("结构化 hook 执行完成：成功 %d 个，失败 %d 个。", successes, len(failures))
-	return summary, errors.Join(failures...)
 }
 
 func runStructuredHook(hook HookConfig, domain, certPath, keyPath string) error {
@@ -176,12 +156,4 @@ func hookEnvironment(path string) ([]string, error) {
 		values = append(values, key+"="+value)
 	}
 	return values, nil
-}
-
-func logHookResult(id, result string, err error) {
-	if err != nil {
-		log.Printf("[hook] id=%s result=%s error=%v", id, result, err)
-		return
-	}
-	log.Printf("[hook] id=%s result=%s", id, result)
 }

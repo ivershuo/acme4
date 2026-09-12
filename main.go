@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -192,27 +191,6 @@ func certPaths(certDir string, names []string) (certPath, keyPath string) {
 	return filepath.Join(certDir, base+".crt"), filepath.Join(certDir, base+".key")
 }
 
-// certNeedRenew 返回证书剩余有效期、到期时间和错误
-func certNeedRenew(certPath string) (time.Duration, time.Time, error) {
-	data, err := os.ReadFile(certPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, time.Time{}, nil // 文件不存在，视为需要申请
-		}
-		return 0, time.Time{}, err
-	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return 0, time.Time{}, fmt.Errorf("invalid cert PEM")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return 0, time.Time{}, err
-	}
-	remain := time.Until(cert.NotAfter)
-	return remain, cert.NotAfter, nil
-}
-
 func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks []string, structuredHooks []HookConfig, renewBeforeDays int, emailService *notification.EmailService, acmeDirectoryURL string, dnsResolvers []string) error {
 	if len(domain.Names) == 0 {
 		return errors.New("configuration: domain names cannot be empty")
@@ -303,27 +281,6 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 	return nil
 }
 
-func installAndDeploy(certPath, keyPath string, certPEM, keyPEM []byte, hooks []string, domain string) (string, error) {
-	return installAndDeployConfigured(certPath, keyPath, certPEM, keyPEM, hooks, nil, domain)
-}
-
-func installAndDeployConfigured(certPath, keyPath string, certPEM, keyPEM []byte, hooks []string, structuredHooks []HookConfig, domain string) (string, error) {
-	if err := saveCertificatePair(certPath, keyPath, certPEM, keyPEM); err != nil {
-		return "", fmt.Errorf("certificate persistence: %w", err)
-	}
-	var summary string
-	var err error
-	if len(structuredHooks) > 0 {
-		summary, err = runStructuredHooks(structuredHooks, domain, certPath, keyPath)
-	} else {
-		summary, err = runPostRenewHooks(hooks, domain, certPath, keyPath)
-	}
-	if err != nil {
-		return summary, fmt.Errorf("deployment: %w", err)
-	}
-	return summary, nil
-}
-
 func writeTempFile(dir, pattern string, data []byte) (path string, err error) {
 	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
@@ -379,30 +336,28 @@ func saveCertificatePair(certPath, keyPath string, certPEM, keyPEM []byte) error
 		return fmt.Errorf("install private key: %w", err)
 	}
 	if err := replaceFile(certTemp, certPath); err != nil {
-		var rollbackErr error
-		if keyExisted {
-			rollbackErr = os.WriteFile(keyPath, oldKey, 0600)
-		} else {
-			rollbackErr = os.Remove(keyPath)
-		}
+		rollbackErr := restorePrivateKey(keyPath, oldKey, keyExisted)
 		return errors.Join(fmt.Errorf("install certificate: %w", err), rollbackErr)
 	}
 	return nil
 }
 
-func shouldSendExpiryWarning(remain time.Duration, renewBeforeDays int) bool {
-	if remain <= 0 {
-		return true
-	}
-
-	remainingDays := int(math.Ceil(remain.Hours() / 24))
-	for _, day := range []int{renewBeforeDays + 7, renewBeforeDays + 3, renewBeforeDays + 1} {
-		if remainingDays == day {
-			return true
+func restorePrivateKey(keyPath string, oldKey []byte, existed bool) error {
+	if !existed {
+		if err := os.Remove(keyPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove newly installed private key: %w", err)
 		}
+		return nil
 	}
-
-	return false
+	temp, err := writeTempFile(filepath.Dir(keyPath), ".acme4-key-rollback-*", oldKey)
+	if err != nil {
+		return fmt.Errorf("write private key rollback file: %w", err)
+	}
+	defer os.Remove(temp)
+	if err := replaceFile(temp, keyPath); err != nil {
+		return fmt.Errorf("restore private key: %w", err)
+	}
+	return nil
 }
 
 func hurricaneFailureAdvice(err error, names []string) string {

@@ -142,20 +142,34 @@ func TestInspectCertificatePairTreatsDamageAsRenewable(t *testing.T) {
 	}
 }
 
-func TestInstallAndDeployDoesNotRunHookWhenPersistenceFails(t *testing.T) {
+func TestSavePendingCertificateFailsBeforeDeployment(t *testing.T) {
 	dir := t.TempDir()
-	marker := filepath.Join(dir, "hook-ran")
 	cert, key := testCertificatePair(t, "example.com")
-	badCertPath := filepath.Join(dir, "certificate-is-a-directory")
-	if err := os.Mkdir(badCertPath, 0700); err != nil {
+	badCertDir := filepath.Join(dir, "cert-dir-is-a-file")
+	if err := os.WriteFile(badCertDir, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := installAndDeploy(badCertPath, filepath.Join(dir, "example.com.key"), cert, key, []string{"touch " + marker}, "example.com")
-	if err == nil || !strings.Contains(err.Error(), "certificate persistence") {
-		t.Fatalf("installAndDeploy() error = %v", err)
+	if err := savePendingCertificate(badCertDir, []string{"example.com"}, cert, key); err == nil {
+		t.Fatal("savePendingCertificate() expected persistence failure")
 	}
-	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-		t.Fatalf("deployment hook ran after persistence failure: %v", statErr)
+}
+
+func TestRestorePrivateKeyUsesCompleteReplacement(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "example.com.key")
+	oldKey := []byte("complete old private key")
+	if err := os.WriteFile(keyPath, []byte("new key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := restorePrivateKey(keyPath, oldKey, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(oldKey) {
+		t.Fatalf("restored private key = %q, want %q", got, oldKey)
 	}
 }
 
@@ -241,12 +255,15 @@ func TestDNSResolverNormalizationRejectsInvalidPort(t *testing.T) {
 	}
 }
 
-func TestInstallAndDeployReportsHookFailure(t *testing.T) {
+func TestPendingDeploymentReportsHookFailure(t *testing.T) {
 	dir := t.TempDir()
 	cert, key := testCertificatePair(t, "example.com")
-	_, err := installAndDeploy(filepath.Join(dir, "example.com.crt"), filepath.Join(dir, "example.com.key"), cert, key, []string{"exit 7"}, "example.com")
-	if err == nil || !strings.Contains(err.Error(), "deployment") {
-		t.Fatalf("installAndDeploy() error = %v", err)
+	if err := savePendingCertificate(dir, []string{"example.com"}, cert, key); err != nil {
+		t.Fatal(err)
+	}
+	pending, _, err := deployPendingCertificate(dir, []string{"example.com"}, []string{"exit 7"}, nil)
+	if !pending || err == nil || !strings.Contains(err.Error(), "hook") {
+		t.Fatalf("deployPendingCertificate() pending=%t error=%v", pending, err)
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"log"
 	"strings"
 	"testing"
-	"time"
 
 	"acme4/providers"
 	"acme4/providers/hurricane"
@@ -40,48 +39,6 @@ func TestBoolDefault(t *testing.T) {
 	value := false
 	if boolDefault(&value, true) {
 		t.Fatal("explicit false should override default true")
-	}
-}
-
-func TestShouldSendExpiryWarning(t *testing.T) {
-	tests := []struct {
-		name            string
-		remaining       time.Duration
-		renewBeforeDays int
-		want            bool
-	}{
-		{
-			name:            "seven days before renewal window",
-			remaining:       37 * 24 * time.Hour,
-			renewBeforeDays: 30,
-			want:            true,
-		},
-		{
-			name:            "inside broad warning window but not boundary",
-			remaining:       35 * 24 * time.Hour,
-			renewBeforeDays: 30,
-			want:            false,
-		},
-		{
-			name:            "one day before renewal window",
-			remaining:       31 * 24 * time.Hour,
-			renewBeforeDays: 30,
-			want:            true,
-		},
-		{
-			name:            "expired",
-			remaining:       -time.Hour,
-			renewBeforeDays: 30,
-			want:            true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldSendExpiryWarning(tt.remaining, tt.renewBeforeDays); got != tt.want {
-				t.Fatalf("shouldSendExpiryWarning() = %t, want %t", got, tt.want)
-			}
-		})
 	}
 }
 

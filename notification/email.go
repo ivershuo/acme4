@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -104,10 +105,7 @@ func (e *EmailService) sendEmail(subject, htmlContent, textContent string) error
 		return fmt.Errorf("没有配置收件人邮箱")
 	}
 
-	fromAddress := e.fromEmail
-	if e.fromName != "" {
-		fromAddress = fmt.Sprintf("%s <%s>", e.fromName, e.fromEmail)
-	}
+	fromAddress := formatFromAddress(e.fromName, e.fromEmail)
 
 	params := &resend.SendEmailRequest{
 		From:    fromAddress,
@@ -126,6 +124,13 @@ func (e *EmailService) sendEmail(subject, htmlContent, textContent string) error
 
 	log.Printf("邮件发送成功，ID: %s，收件人: %s", sent.Id, strings.Join(e.toEmails, ", "))
 	return nil
+}
+
+func formatFromAddress(name, address string) string {
+	if name == "" {
+		return address
+	}
+	return (&mail.Address{Name: name, Address: address}).String()
 }
 
 func (e *EmailService) buildSuccessHTML(data NotificationData) string {

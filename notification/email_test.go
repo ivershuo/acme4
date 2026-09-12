@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/mail"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,20 @@ func TestEmailRequestTimeout(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "deadline") {
 		t.Fatalf("expected deadline error, got %v", err)
+	}
+}
+
+func TestFormatFromAddressEscapesDisplayName(t *testing.T) {
+	formatted := formatFromAddress("Ops, Team\r\nBcc: attacker@example.com", "from@example.com")
+	if strings.ContainsAny(formatted, "\r\n") {
+		t.Fatalf("formatted From address contains a header newline: %q", formatted)
+	}
+	parsed, err := mail.ParseAddress(formatted)
+	if err != nil {
+		t.Fatalf("formatted From address is invalid: %v", err)
+	}
+	if parsed.Address != "from@example.com" {
+		t.Fatalf("formatted From address = %q, want from@example.com", parsed.Address)
 	}
 }
 

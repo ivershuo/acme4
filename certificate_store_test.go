@@ -77,6 +77,25 @@ func TestStructuredHookRedactsEnvironmentFileValues(t *testing.T) {
 	}
 }
 
+func TestHookEnvironmentUsesLiteralSimplifiedValues(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "hook.env")
+	if err := os.WriteFile(envPath, []byte("QUOTED=\"literal\"\nLEADING= value \n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	values, err := hookEnvironment(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(values, "\n")
+	if !strings.Contains(joined, "QUOTED=\"literal\"") {
+		t.Fatalf("dotenv quotes should remain literal: %q", joined)
+	}
+	if !strings.Contains(joined, "LEADING= value") {
+		t.Fatalf("leading value whitespace should remain after line trimming: %q", joined)
+	}
+}
+
 func TestHookConfigurationChangeRedeploysCurrentVersion(t *testing.T) {
 	dir := t.TempDir()
 	cert, key := testCertificatePair(t, "example.com")

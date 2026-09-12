@@ -23,7 +23,7 @@ hooks:
     env_file: /etc/acme4/tencent-upload.env
 ```
 
-`env_file` 不执行 shell，也不展开变量；内容应为：
+`env_file` 不执行 shell，也不展开变量；它不是完整 dotenv 解析器，只接受简化的 `KEY=value` 行。不要写 `export`、行尾注释或包裹值的引号，否则它们会被当成键值内容。文件内容应为：
 
 ```text
 TENCENTCLOUD_SECRET_ID=AKID...
@@ -75,8 +75,8 @@ TENCENTCLOUD_SECRET_KEY=...
 - `TENCENTCLOUD_SECRET_ID`
 - `TENCENTCLOUD_SECRET_KEY`
 
-`--secret-id` 和 `--secret-key` 仍保留用于兼容已有调用，但不推荐使用，
-因为命令行参数可能被同机用户通过进程信息看到。命令行参数优先于同名环境变量。
+`--secret-id` 和 `--secret-key` 仅为已有调用和临时调试保留，生产部署不推荐使用，
+因为命令行参数可能被同机用户通过进程信息和 shell history 看到。命令行参数优先于同名环境变量。
 
 ## 输出
 

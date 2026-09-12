@@ -36,13 +36,17 @@ type hookTask struct {
 }
 
 func certificateStateDir(certDir string, names []string) string {
+	sum := sha256.Sum256([]byte(canonicalNameSet(names)))
+	return filepath.Join(certDir, ".acme4", hex.EncodeToString(sum[:8]))
+}
+
+func canonicalNameSet(names []string) string {
 	normalized := append([]string(nil), names...)
 	for i := range normalized {
 		normalized[i] = strings.ToLower(strings.TrimSuffix(normalized[i], "."))
 	}
 	sort.Strings(normalized)
-	sum := sha256.Sum256([]byte(strings.Join(normalized, "\x00")))
-	return filepath.Join(certDir, ".acme4", hex.EncodeToString(sum[:8]))
+	return strings.Join(normalized, "\x00")
 }
 
 func stageCertificateVersion(certDir string, names []string, certPEM, keyPEM []byte) (*pendingVersion, error) {
@@ -194,9 +198,6 @@ func deployPendingCertificate(certDir string, names []string, legacy []string, s
 	for _, task := range tasks {
 		if pending.Completed[task.id] {
 			continue
-		}
-		if err := saveDeploymentState(certDir, names, state); err != nil {
-			return true, "", fmt.Errorf("record pending hook %s: %w", task.id, err)
 		}
 		if err := task.run(pending.CertPath, pending.KeyPath); err != nil {
 			failures = append(failures, fmt.Errorf("hook %s: %w", task.id, err))

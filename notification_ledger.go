@@ -20,6 +20,8 @@ type notificationLedger struct {
 	LastFailureAt       time.Time            `json:"last_failure_at,omitempty"`
 }
 
+const notificationHistoryRetention = 400 * 24 * time.Hour
+
 func notificationLedgerPath(certDir string, names []string) string {
 	return filepath.Join(certificateStateDir(certDir, names), "notifications.json")
 }
@@ -43,6 +45,7 @@ func loadNotificationLedger(certDir string, names []string) (notificationLedger,
 }
 
 func saveNotificationLedger(certDir string, names []string, ledger notificationLedger) error {
+	pruneNotificationHistory(&ledger, time.Now())
 	dir := certificateStateDir(certDir, names)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -57,6 +60,18 @@ func saveNotificationLedger(certDir string, names []string, ledger notificationL
 	}
 	defer os.Remove(temp)
 	return replaceFile(temp, notificationLedgerPath(certDir, names))
+}
+
+func pruneNotificationHistory(ledger *notificationLedger, now time.Time) {
+	if ledger == nil {
+		return
+	}
+	cutoff := now.Add(-notificationHistoryRetention)
+	for key, sentAt := range ledger.Sent {
+		if sentAt.Before(cutoff) {
+			delete(ledger.Sent, key)
+		}
+	}
 }
 
 func expiryNotificationLevel(remaining time.Duration, renewBeforeDays int) string {

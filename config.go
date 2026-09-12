@@ -85,6 +85,7 @@ func validateConfig(cfg *Config) error {
 		add("domains: must contain at least one certificate entry")
 	}
 	seenOutputs := make(map[string]int)
+	seenNameSets := make(map[string]int)
 	for i := range cfg.Domains {
 		domain := &cfg.Domains[i]
 		prefix := fmt.Sprintf("domains[%d]", i)
@@ -104,6 +105,14 @@ func validateConfig(cfg *Config) error {
 				}
 				seenNames[normalized] = struct{}{}
 				domain.Names[j] = normalized
+			}
+			if len(seenNames) == len(domain.Names) {
+				nameSet := canonicalNameSet(domain.Names)
+				if previous, exists := seenNameSets[nameSet]; exists {
+					add("%s.names: normalized name set duplicates domains[%d].names regardless of order", prefix, previous)
+				} else {
+					seenNameSets[nameSet] = i
+				}
 			}
 		}
 		providerName := strings.ToLower(strings.TrimSpace(domain.Provider))

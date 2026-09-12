@@ -47,3 +47,18 @@ func TestFailureNotificationDailyLimitAndCategoryChange(t *testing.T) {
 		t.Fatal("same category should notify again after 24 hours")
 	}
 }
+
+func TestPruneNotificationHistoryRemovesOnlyExpiredEntries(t *testing.T) {
+	now := time.Now()
+	ledger := notificationLedger{Sent: map[string]time.Time{
+		"expired": now.Add(-notificationHistoryRetention - time.Hour),
+		"recent":  now.Add(-notificationHistoryRetention + time.Hour),
+	}}
+	pruneNotificationHistory(&ledger, now)
+	if _, exists := ledger.Sent["expired"]; exists {
+		t.Fatal("expired notification history was not pruned")
+	}
+	if _, exists := ledger.Sent["recent"]; !exists {
+		t.Fatal("recent notification history was pruned")
+	}
+}

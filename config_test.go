@@ -86,6 +86,21 @@ func TestValidateConfigRejectsOutputPathCollision(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsOrderIndependentNameSetCollision(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(filepath.Join(dir, "certs"), filepath.Join(dir, "accounts"))
+	cfg.Domains[0].Names = []string{"b.example.com", "a.example.com"}
+	cfg.Domains = append(cfg.Domains, providers.Domain{
+		Names:       []string{"a.example.com", "b.example.com"},
+		Provider:    "cloudflare",
+		Credentials: map[string]string{"api_token": "token"},
+	})
+	err := validateConfig(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "name set duplicates") {
+		t.Fatalf("validateConfig() error = %v, want order-independent name set conflict", err)
+	}
+}
+
 func TestLoadConfigStrictYAML(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
