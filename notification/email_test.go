@@ -1,10 +1,19 @@
 package notification
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/resend/resend-go/v2"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
 func TestBuildSuccessTextUsesDayBasedRemainingAndHookSummary(t *testing.T) {
 	service := &EmailService{}
@@ -28,6 +37,23 @@ func TestBuildSuccessTextUsesDayBasedRemainingAndHookSummary(t *testing.T) {
 	}
 	if strings.Contains(got, "h") {
 		t.Fatalf("remaining duration should not use raw Go hour format, got %q", got)
+	}
+}
+
+func TestEmailRequestTimeout(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	client := resend.NewCustomClient(&http.Client{Timeout: 20 * time.Millisecond, Transport: transport}, "test-key")
+	service := &EmailService{client: client, fromEmail: "from@example.com", toEmails: []string{"to@example.com"}, enabled: true, notifyOnFailure: true}
+	started := time.Now()
+	err := service.SendFailureNotification(NotificationData{Domains: []string{"example.com"}, Error: "failure", Timestamp: time.Now()})
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("expected bounded email request, duration=%s err=%v", time.Since(started), err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("expected deadline error, got %v", err)
 	}
 }
 

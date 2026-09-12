@@ -1,7 +1,8 @@
 package providers
 
 import (
-	"os"
+	"fmt"
+
 	"github.com/go-acme/lego/v4/challenge"
 	"github.com/go-acme/lego/v4/providers/dns/porkbun"
 )
@@ -11,7 +12,12 @@ func init() {
 }
 
 func newPorkbunProvider(domain Domain) (challenge.Provider, error) {
-	os.Setenv("PORKBUN_API_KEY", domain.Credentials["api_key"])
-	os.Setenv("PORKBUN_SECRET_API_KEY", domain.Credentials["secret_api_key"])
-	return porkbun.NewDNSProvider()
+	apiKey, secretAPIKey := domain.Credentials["api_key"], domain.Credentials["secret_api_key"]
+	if apiKey == "" || secretAPIKey == "" {
+		return nil, fmt.Errorf("porkbun: credentials.api_key and credentials.secret_api_key are required")
+	}
+	config := porkbun.NewDefaultConfig()
+	config.APIKey = apiKey
+	config.SecretAPIKey = secretAPIKey
+	return porkbun.NewDNSProviderConfig(config)
 }

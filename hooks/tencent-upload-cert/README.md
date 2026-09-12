@@ -1,6 +1,6 @@
 # Tencent Upload Cert Hook
 
-这个 hook 会把当前续期成功的证书上传到腾讯云 SSL 证书服务，并输出新的 `CertificateId`。
+这个 hook 会把当前续期成功的证书上传到腾讯云 SSL 证书服务，并输出证书 ID。
 
 ## 编译
 
@@ -12,12 +12,21 @@ go build -o hooks/tencent-upload-cert/tencent-upload-cert ./hooks/tencent-upload
 
 ## 使用方式
 
-推荐在 `post_renew_hooks` 里显式传入当前证书路径和域名：
+推荐使用结构化 `hooks` 显式传入当前证书、私钥和别名，并通过权限为 `0600` 的 `env_file` 提供凭据：
 
 ```yaml
-post_renew_hooks:
-  - "./hooks/tencent-upload-cert/tencent-upload-cert --cert {cert_path} --key {key_path} --domain {domain} --secret-id ${TENCENTCLOUD_SECRET_ID} --secret-key ${TENCENTCLOUD_SECRET_KEY}"
+hooks:
+  - id: upload-tencent
+    command: ./hooks/tencent-upload-cert/tencent-upload-cert
+    args: ["--cert", "{cert_path}", "--key", "{key_path}", "--alias", "{domain}"]
+    timeout: 30s
+    env_file: /etc/acme4/tencent-upload.env
 ```
+
+运行任务的服务用户需要预先配置 `TENCENTCLOUD_SECRET_ID` 和
+`TENCENTCLOUD_SECRET_KEY`；不要把 `SecretKey` 写入 hook 命令。
+
+旧 `post_renew_hooks` 字符串模式仍兼容，但会经过 shell，并可能在日志中显示展开后的命令。
 
 占位符由 `acme4` 主程序替换：
 
@@ -33,18 +42,18 @@ post_renew_hooks:
 ./hooks/tencent-upload-cert/tencent-upload-cert \
   --cert ./certs/example.com.crt \
   --key ./certs/example.com.key \
-  --secret-id "$TENCENTCLOUD_SECRET_ID" \
-  --secret-key "$TENCENTCLOUD_SECRET_KEY"
+  --alias example.com
 ```
 
-或者：
+上面的参数组合是推荐用法：`--cert`、`--key` 和 `--alias` 一起使用，
+不要再同时传入 `--domain`。凭据从环境变量读取。
+
+为兼容按域名推导文件路径的旧配置，也可以使用：
 
 ```sh
 ./hooks/tencent-upload-cert/tencent-upload-cert \
   --domain example.com \
-  --cert-dir ./certs \
-  --secret-id "$TENCENTCLOUD_SECRET_ID" \
-  --secret-key "$TENCENTCLOUD_SECRET_KEY"
+  --cert-dir ./certs
 ```
 
 可选参数：
@@ -55,15 +64,13 @@ post_renew_hooks:
 
 ## 凭证
 
-首选通过命令行参数传入：
-
-- `--secret-id`
-- `--secret-key`
-
-也支持环境变量 fallback：
+推荐通过环境变量传入：
 
 - `TENCENTCLOUD_SECRET_ID`
 - `TENCENTCLOUD_SECRET_KEY`
+
+`--secret-id` 和 `--secret-key` 仍保留用于兼容已有调用，但不推荐使用，
+因为命令行参数可能被同机用户通过进程信息看到。命令行参数优先于同名环境变量。
 
 ## 输出
 
@@ -72,5 +79,13 @@ post_renew_hooks:
 ```text
 uploaded certificate_id=cert-123 request_id=req-1
 ```
+
+上传请求使用 `Repeatable=false`。首次上传返回 `CertificateId`；如果腾讯云
+判定证书已存在，则返回 `RepeatCertId`，hook 会把它作为同一个成功的证书 ID
+返回，不会因为重复执行而产生新的证书。
+
+请求超时为 30 秒。超时、腾讯云 API 错误、证书或私钥不匹配都会返回非 0
+exit code；上传成功仅表示证书已进入腾讯云 SSL 证书服务，不表示它已经绑定到
+CDN、CLB 或其他线上资源。
 
 失败时返回非 0 exit code，并把错误输出到 stderr。

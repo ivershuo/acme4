@@ -1,10 +1,12 @@
 package notification
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"log"
 	"math"
+	"net/http"
 	"strings"
 	"time"
 
@@ -23,6 +25,8 @@ type EmailService struct {
 	notifyOnExpiry  bool
 }
 
+const emailRequestTimeout = 15 * time.Second
+
 type NotificationData struct {
 	Domains     []string
 	Success     bool
@@ -40,7 +44,7 @@ func NewEmailService(apiKey, fromEmail, fromName string, toEmails []string, enab
 	}
 
 	return &EmailService{
-		client:    resend.NewClient(apiKey),
+		client:    resend.NewCustomClient(&http.Client{Timeout: emailRequestTimeout}, apiKey),
 		fromEmail: fromEmail,
 		fromName:  fromName,
 		toEmails:  toEmails,
@@ -113,7 +117,9 @@ func (e *EmailService) sendEmail(subject, htmlContent, textContent string) error
 		Text:    textContent,
 	}
 
-	sent, err := e.client.Emails.Send(params)
+	ctx, cancel := context.WithTimeout(context.Background(), emailRequestTimeout)
+	defer cancel()
+	sent, err := e.client.Emails.SendWithContext(ctx, params)
 	if err != nil {
 		return fmt.Errorf("发送邮件失败: %v", err)
 	}

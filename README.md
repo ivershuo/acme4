@@ -104,12 +104,41 @@ go build -o acme4
 ./acme4 -config=config.yaml
 ```
 
+只检查严格 YAML、域名、provider 凭据、输出冲突及 resolver 等配置，不创建目录、不访问 DNS/CA、也不执行 hook：
+
+```sh
+./acme4 -check-config -config=config.yaml
+```
+
+每个 provider 可以用 `credentials_file` 替代内联 `credentials`。文件是严格 YAML 键值映射、相对配置文件目录解析，必须是仅所有者可读写的普通文件（例如 `0600`），且不能同时配置两种来源。
+
+推荐使用结构化 `hooks`：
+
+```yaml
+hooks:
+  - id: reload-nginx
+    command: /usr/sbin/nginx
+    args: ["-s", "reload"]
+    timeout: 120s
+  - id: upload-tencent
+    command: /opt/acme4/tencent-upload-cert
+    args: ["--cert", "{cert_path}", "--key", "{key_path}", "--alias", "{domain}"]
+    timeout: 30s
+    env_file: /etc/acme4/tencent-upload.env
+```
+
+结构化 hook 参数不会经过 shell 二次解释，默认超时 120 秒，输出最多保留 64 KiB。`env_file` 按 `KEY=VALUE` 读取而不执行 shell，且不会继承 DNS、ACME 或邮件密钥。旧 `post_renew_hooks` 保留原 shell 语义，两种格式不可同时使用；旧模式可能把展开后的命令写入日志，因此不要把凭据放入命令参数。
+
+新证书先保存在 `cert_dir/.acme4/` 的不可变版本目录并校验完整性，再原子更新 `<首域名>.crt/.key` 兼容路径，让 reload 类 hook 能读取新版本。hook 失败状态会持久化，上一完整版本仍保留用于恢复；下一轮只重试未完成或配置变化后的 hook，不重新申请证书。外部命令在进程中断边界只能保证至少执行一次，因此 hook 应具备幂等性。
+
 #### 检查远程主机证书信息
 
 可通过 `-ssl-domain` 参数快速检测远程主机的 TLS 证书信息：
 
 ```sh
 ./acme4 -ssl-domain=example.com
+# 连接 IP/端口，但使用指定虚拟主机 SNI 和主机名校验：
+./acme4 -ssl-domain=192.0.2.10:443 -ssl-server-name=example.com
 ```
 
 ### 3. crontab 自动化（示例）
@@ -158,10 +187,10 @@ func(domain Domain) (challenge.Provider, error)
 ```
 
 ## 证书更新后自动操作
-- 在 `config.yaml` 的 `post_renew_hooks` 字段配置 shell 命令，如 `nginx -s reload`。
-- hook 命令支持占位符：`{domain}`、`{cert_path}`、`{key_path}`。
-- 每次证书更新后会自动依次执行这些命令，并将输出写入日志。
-- 日志中会详细记录证书处理、钩子执行的成功与失败，并给出排查建议。
+- 优先使用前文的结构化 `hooks`；`post_renew_hooks` 仅用于兼容需要 shell 语义的旧配置。
+- 两种 hook 都支持 `{domain}`、`{cert_path}`、`{key_path}`，其中证书路径指向同一个不可变版本。
+- 部署状态按证书版本和 hook 标识持久化；成功步骤不会在失败重试时重复执行。
+- 结构化 hook 日志只显示标识、结果和脱敏后的受限输出。
 
 ## 邮件通知功能
 - 支持通过 [Resend](https://resend.com/) 服务发送邮件通知
@@ -189,7 +218,7 @@ email_notification:
   notify_on_expiry: true                          # 即将到期通知
 ```
 
-`notify_on_success`、`notify_on_failure`、`notify_on_expiry` 未配置时默认启用，显式设置为 `false` 可关闭对应通知。到期提醒会在进入续期窗口前 7、3、1 天发送，避免每天重复提醒；邮件中的剩余有效期会按远近展示为天、小时或分钟。
+`notify_on_success`、`notify_on_failure`、`notify_on_expiry` 未配置时默认启用，显式设置为 `false` 可关闭对应通知。提醒覆盖进入续签窗口前 7、3、1 天以及实际到期前 7、3、1 天和过期状态；按跨越阈值触发并持久化去重。持续同类失败默认每天最多通知一次，错误类别变化会立即通知；发送未确认成功的事件保留到后续运行重试。
 
 ## 错误处理与日志
 - 所有关键步骤均有详细日志输出，便于排查问题。

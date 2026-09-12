@@ -8,6 +8,8 @@ domains:
     credentials:
       # Token 仅需专用验证 zone 的 DNS 编辑 + Zone 读取权限。
       api_token: "CF_VALIDATION_ZONE_TOKEN"
+    # 也可改用仅当前用户可读（0600）的 YAML 文件；不能与 credentials 同时使用：
+    # credentials_file: "/etc/acme4/cloudflare-credentials.yaml"
   - names: ["example.net"]
     provider: "hurricane"
     credentials:
@@ -25,7 +27,7 @@ domains:
     # HURRICANE_SEQUENCE_INTERVAL=120
     # HURRICANE_INTERVAL_RETRIES=3
     # HURRICANE_INTERVAL_RETRY_WAIT=30
-  - names: ["example.net"]
+  - names: ["example.org"]
     provider: "cloudflare"
     credentials:
       api_token: "CF_xxx"
@@ -39,8 +41,8 @@ domains:
     credentials:
       api_key: "PORKBUN_API_KEY"
       secret_api_key: "PORKBUN_SECRET_API_KEY"
-cert_dir: "./certs"
-account_dir: "./accounts"
+cert_dir: "/var/lib/acme4/certs"
+account_dir: "/var/lib/acme4/accounts"
 renew_before: 30 # 证书到期前多少天开始续期，默认30天
 # 可选。省略时使用当前生产 CA；staging 必须同时使用独立的
 # cert_dir、account_dir，并关闭 post_renew_hooks（见 README）。
@@ -52,8 +54,20 @@ dns_resolvers:
 post_renew_hooks:
   - "nginx -s reload"
   # 内置 hook 示例：上传当前证书到腾讯云 SSL 证书服务
-  # - "./hooks/tencent-upload-cert/tencent-upload-cert --cert {cert_path} --key {key_path} --domain {domain} --secret-id ${TENCENTCLOUD_SECRET_ID} --secret-key ${TENCENTCLOUD_SECRET_KEY}"
+  # - "./hooks/tencent-upload-cert/tencent-upload-cert --cert {cert_path} --key {key_path} --alias {domain}"
   # - "systemctl reload haproxy"
+
+# 推荐的新结构化 hook；与 post_renew_hooks 二选一。参数不会再次经过 shell 解析。
+# hooks:
+#   - id: "reload-nginx"
+#     command: "/usr/sbin/nginx"
+#     args: ["-s", "reload"]
+#     timeout: "120s"
+#   - id: "upload-tencent"
+#     command: "/opt/acme4/tencent-upload-cert"
+#     args: ["--cert", "{cert_path}", "--key", "{key_path}", "--alias", "{domain}"]
+#     timeout: "30s"
+#     env_file: "/etc/acme4/tencent-upload.env" # 必须为普通文件且权限不宽于 0600
 
 # 邮件通知配置（可选）
 email_notification:

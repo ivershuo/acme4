@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -39,7 +41,7 @@ func TestUploaderUploadBuildsExpectedRequest(t *testing.T) {
 				for _, want := range []string{
 					`"CertificateType":"SVR"`,
 					`"Alias":"example.com"`,
-					`"Repeatable":true`,
+					`"Repeatable":false`,
 				} {
 					if !strings.Contains(payload, want) {
 						t.Fatalf("request payload %q missing %s", payload, want)
@@ -66,6 +68,82 @@ func TestUploaderUploadBuildsExpectedRequest(t *testing.T) {
 
 	if resp.CertificateID != "cert-123" || resp.RequestID != "req-1" {
 		t.Fatalf("unexpected upload response: %+v", resp)
+	}
+}
+
+func TestUploaderUploadAcceptsRepeatCertificateID(t *testing.T) {
+	certPEM, keyPEM := mustCreateTestKeyPair(t)
+	uploader := &TencentUploader{Client: mockUploadClient{
+		send: func(request tchttp.Request, response tchttp.Response) error {
+			if err := json.Unmarshal([]byte(`{"Response":{"CertificateId":"","RepeatCertId":"cert-existing","RequestId":"req-2"}}`), response); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			return nil
+		},
+	}}
+
+	resp, err := uploader.Upload(UploadRequest{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM})
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	if resp.CertificateID != "cert-existing" || resp.RepeatCertID != "cert-existing" {
+		t.Fatalf("unexpected repeat upload response: %+v", resp)
+	}
+}
+
+func TestUploaderUploadRejectsEmptyCertificateIDs(t *testing.T) {
+	certPEM, keyPEM := mustCreateTestKeyPair(t)
+	uploader := &TencentUploader{Client: mockUploadClient{
+		send: func(request tchttp.Request, response tchttp.Response) error {
+			if err := json.Unmarshal([]byte(`{"Response":{"RequestId":"req-empty"}}`), response); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			return nil
+		},
+	}}
+
+	if _, err := uploader.Upload(UploadRequest{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM}); err == nil || !strings.Contains(err.Error(), "empty certificate id") {
+		t.Fatalf("Upload() error = %v, want empty certificate id error", err)
+	}
+}
+
+func TestUploaderUploadReturnsAPIError(t *testing.T) {
+	certPEM, keyPEM := mustCreateTestKeyPair(t)
+	uploader := &TencentUploader{Client: mockUploadClient{
+		send: func(request tchttp.Request, response tchttp.Response) error {
+			if err := json.Unmarshal([]byte(`{"Response":{"Error":{"Code":"FailedOperation","Message":"certificate rejected"},"RequestId":"req-error"}}`), response); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			return nil
+		},
+	}}
+
+	if _, err := uploader.Upload(UploadRequest{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM}); err == nil || !strings.Contains(err.Error(), "FailedOperation") || !strings.Contains(err.Error(), "certificate rejected") {
+		t.Fatalf("Upload() error = %v, want Tencent API error", err)
+	}
+}
+
+func TestUploaderUploadReturnsTimeout(t *testing.T) {
+	certPEM, keyPEM := mustCreateTestKeyPair(t)
+	uploader := &TencentUploader{Client: mockUploadClient{
+		send: func(request tchttp.Request, response tchttp.Response) error {
+			return context.DeadlineExceeded
+		},
+	}}
+
+	_, err := uploader.Upload(UploadRequest{CertificatePEM: certPEM, PrivateKeyPEM: keyPEM})
+	if err == nil || !strings.Contains(err.Error(), "upload certificate request") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Upload() error = %v, want wrapped timeout", err)
+	}
+}
+
+func TestUploadClientProfileHasExplicitRequestTimeout(t *testing.T) {
+	profile := newUploadClientProfile()
+	if profile == nil || profile.HttpProfile == nil {
+		t.Fatal("newUploadClientProfile() returned incomplete profile")
+	}
+	if profile.HttpProfile.ReqTimeout != int(uploadRequestTimeout/time.Second) {
+		t.Fatalf("request timeout = %d seconds, want %d", profile.HttpProfile.ReqTimeout, int(uploadRequestTimeout/time.Second))
 	}
 }
 

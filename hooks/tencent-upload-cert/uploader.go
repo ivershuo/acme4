@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	tccommon "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	tchttp "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/http"
@@ -14,6 +15,11 @@ import (
 )
 
 const sslAPIVersion = "2019-12-05"
+
+// uploadRequestTimeout bounds a request made by the real Tencent SDK client.
+// A failed request is returned to the hook so the caller can retry on the next
+// renewal run; the hook must not wait indefinitely for the remote API.
+const uploadRequestTimeout = 30 * time.Second
 
 type UploadRequest struct {
 	CertificatePEM string
@@ -53,14 +59,14 @@ func (u *TencentUploader) Upload(req UploadRequest) (UploadResponse, error) {
 		"CertificatePrivateKey": req.PrivateKeyPEM,
 		"CertificateType":       "SVR",
 		"Alias":                 req.Alias,
-		"Repeatable":            true,
+		"Repeatable":            false,
 	}); err != nil {
 		return UploadResponse{}, fmt.Errorf("build request: %w", err)
 	}
 
 	response := tchttp.NewCommonResponse()
 	if err := client.Send(request, response); err != nil {
-		return UploadResponse{}, err
+		return UploadResponse{}, fmt.Errorf("upload certificate request: %w", err)
 	}
 
 	var envelope struct {
@@ -68,6 +74,10 @@ func (u *TencentUploader) Upload(req UploadRequest) (UploadResponse, error) {
 			CertificateID string `json:"CertificateId"`
 			RepeatCertID  string `json:"RepeatCertId"`
 			RequestID     string `json:"RequestId"`
+			Error         *struct {
+				Code    string `json:"Code"`
+				Message string `json:"Message"`
+			} `json:"Error"`
 		} `json:"Response"`
 	}
 
@@ -75,12 +85,27 @@ func (u *TencentUploader) Upload(req UploadRequest) (UploadResponse, error) {
 		return UploadResponse{}, fmt.Errorf("decode response: %w", err)
 	}
 
-	if envelope.Response.CertificateID == "" {
+	if envelope.Response.Error != nil {
+		apiError := envelope.Response.Error
+		if apiError.Code == "" {
+			return UploadResponse{}, fmt.Errorf("Tencent Cloud UploadCertificate failed: %s", apiError.Message)
+		}
+		return UploadResponse{}, fmt.Errorf("Tencent Cloud UploadCertificate failed (%s): %s", apiError.Code, apiError.Message)
+	}
+
+	// Tencent returns CertificateId for a new upload and RepeatCertId when
+	// Repeatable=false detects an existing certificate. Treat either as the
+	// canonical ID so callers do not upload the same certificate repeatedly.
+	certificateID := envelope.Response.CertificateID
+	if certificateID == "" {
+		certificateID = envelope.Response.RepeatCertID
+	}
+	if certificateID == "" {
 		return UploadResponse{}, errors.New("empty certificate id in Tencent Cloud response")
 	}
 
 	return UploadResponse{
-		CertificateID: envelope.Response.CertificateID,
+		CertificateID: certificateID,
 		RepeatCertID:  envelope.Response.RepeatCertID,
 		RequestID:     envelope.Response.RequestID,
 	}, nil
@@ -88,11 +113,18 @@ func (u *TencentUploader) Upload(req UploadRequest) (UploadResponse, error) {
 
 func newUploadClient(secretID, secretKey string) uploadCertificateAPI {
 	cred := tccommon.NewCredential(secretID, secretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "ssl.tencentcloudapi.com"
-	cpf.DisableRegionBreaker = true
+	cpf := newUploadClientProfile()
 
 	return tccommon.NewCommonClient(cred, "", cpf)
+}
+
+func newUploadClientProfile() *profile.ClientProfile {
+	cpf := profile.NewClientProfile()
+	cpf.HttpProfile.Endpoint = "ssl.tencentcloudapi.com"
+	cpf.HttpProfile.ReqTimeout = int(uploadRequestTimeout / time.Second)
+	cpf.DisableRegionBreaker = true
+
+	return cpf
 }
 
 func resolveCertificateMaterial(cfg Config) (string, string, error) {

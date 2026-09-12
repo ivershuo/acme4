@@ -15,16 +15,27 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
 
-      - name: Build Linux amd64 binary
+      - name: Test and vet
+        run: |
+          go test -race ./...
+          go vet ./...
+
+      - name: Build Linux amd64 binaries and checksums
         run: |
           mkdir -p dist
           GOOS=linux GOARCH=amd64 go build -o dist/acme4
+          GOOS=linux GOARCH=amd64 go build -o dist/tencent-upload-cert ./hooks/tencent-upload-cert
+          cd dist
+          sha256sum acme4 tencent-upload-cert > SHA256SUMS
 
       - name: Upload binary to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/acme4
+          files: |
+            dist/acme4
+            dist/tencent-upload-cert
+            dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

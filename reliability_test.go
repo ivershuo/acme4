@@ -25,6 +25,10 @@ import (
 )
 
 func testCertificatePair(t *testing.T, commonName string) ([]byte, []byte) {
+	return testCertificatePairNames(t, []string{commonName})
+}
+
+func testCertificatePairNames(t *testing.T, names []string) ([]byte, []byte) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -32,8 +36,8 @@ func testCertificatePair(t *testing.T, commonName string) ([]byte, []byte) {
 	}
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: commonName},
-		DNSNames:     []string{commonName},
+		Subject:      pkix.Name{CommonName: names[0]},
+		DNSNames:     names,
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -64,6 +68,77 @@ func TestSaveCertificatePairValidatesMatchBeforeReplacing(t *testing.T) {
 	gotKey, _ := os.ReadFile(keyPath)
 	if string(gotCert) != string(oldCert) || string(gotKey) != string(oldKey) {
 		t.Fatal("existing certificate pair changed after validation failure")
+	}
+}
+
+func TestInspectCertificatePairReasons(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	cert, key := testCertificatePair(t, "example.com")
+	if err := saveCertificatePair(certPath, keyPath, cert, key); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := inspectCertificatePair(certPath, keyPath, []string{"EXAMPLE.COM."}, 0)
+	if err != nil || status.NeedsRenew {
+		t.Fatalf("valid reordered/normalized names status=%+v err=%v", status, err)
+	}
+	status, err = inspectCertificatePair(certPath, keyPath, []string{"example.com", "*.example.com"}, 0)
+	if err != nil || !status.NeedsRenew || status.Reason != "san_changed" {
+		t.Fatalf("SAN change status=%+v err=%v", status, err)
+	}
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	status, err = inspectCertificatePair(certPath, keyPath, []string{"example.com"}, 0)
+	if err != nil || status.Reason != "private_key_missing" {
+		t.Fatalf("missing key status=%+v err=%v", status, err)
+	}
+}
+
+func TestInspectCertificatePairDetectsMismatchedKey(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	cert, _ := testCertificatePair(t, "example.com")
+	_, otherKey := testCertificatePair(t, "other.example.com")
+	if err := os.WriteFile(certPath, cert, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, otherKey, 0600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := inspectCertificatePair(certPath, keyPath, []string{"example.com"}, 0)
+	if err != nil || status.Reason != "certificate_key_mismatch" {
+		t.Fatalf("mismatched key status=%+v err=%v", status, err)
+	}
+}
+
+func TestInspectCertificatePairIgnoresSANOrderButDetectsRemoval(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	cert, key := testCertificatePairNames(t, []string{"example.com", "*.example.com"})
+	if err := saveCertificatePair(certPath, keyPath, cert, key); err != nil {
+		t.Fatal(err)
+	}
+	status, err := inspectCertificatePair(certPath, keyPath, []string{"*.example.com", "example.com"}, 0)
+	if err != nil || status.NeedsRenew {
+		t.Fatalf("SAN order should not renew: status=%+v err=%v", status, err)
+	}
+	status, err = inspectCertificatePair(certPath, keyPath, []string{"example.com"}, 0)
+	if err != nil || status.Reason != "san_changed" {
+		t.Fatalf("SAN removal status=%+v err=%v", status, err)
+	}
+}
+
+func TestInspectCertificatePairTreatsDamageAsRenewable(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	if err := os.WriteFile(certPath, []byte("not a certificate"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := inspectCertificatePair(certPath, filepath.Join(dir, "key.pem"), []string{"example.com"}, 30)
+	if err != nil || !status.NeedsRenew || status.Reason != "certificate_invalid" {
+		t.Fatalf("damaged certificate status=%+v err=%v", status, err)
 	}
 }
 

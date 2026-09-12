@@ -52,6 +52,7 @@ type Config struct {
 	CertDir           string                   `yaml:"cert_dir"`
 	AccountDir        string                   `yaml:"account_dir"`
 	PostRenewHooks    []string                 `yaml:"post_renew_hooks"`
+	Hooks             []HookConfig             `yaml:"hooks"`
 	RenewBefore       int                      `yaml:"renew_before"` // 证书到期前多少天续期
 	DNSResolvers      []string                 `yaml:"dns_resolvers"`
 	ACMEDirectoryURL  string                   `yaml:"acme_directory_url"`
@@ -59,9 +60,11 @@ type Config struct {
 }
 
 type MyUser struct {
-	Email        string
-	Registration *registration.Resource
-	key          crypto.PrivateKey
+	Email          string
+	Registration   *registration.Resource
+	key            crypto.PrivateKey
+	accountDir     string
+	registrationCA string
 }
 
 func (u *MyUser) GetEmail() string {
@@ -80,8 +83,59 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	var cfg Config
-	err = yaml.Unmarshal(data, &cfg)
-	return &cfg, err
+	if err := yaml.UnmarshalStrict(data, &cfg); err != nil {
+		return nil, fmt.Errorf("strict YAML parse: %w", err)
+	}
+	if err := resolveCredentialFiles(&cfg, filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func resolveCredentialFiles(cfg *Config, configDir string) error {
+	for i := range cfg.Domains {
+		domain := &cfg.Domains[i]
+		if domain.CredentialsFile == "" {
+			continue
+		}
+		if len(domain.Credentials) > 0 {
+			return fmt.Errorf("domains[%d]: credentials and credentials_file are mutually exclusive", i)
+		}
+		path := domain.CredentialsFile
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(configDir, path)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("domains[%d].credentials_file: cannot read credential file: %w", i, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("domains[%d].credentials_file: must be a regular file", i)
+		}
+		if info.Mode().Perm()&0077 != 0 {
+			return fmt.Errorf("domains[%d].credentials_file: permissions must not allow group or other access", i)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("domains[%d].credentials_file: cannot read credential file: %w", i, err)
+		}
+		credentials := map[string]string{}
+		if err := yaml.UnmarshalStrict(content, &credentials); err != nil {
+			return fmt.Errorf("domains[%d].credentials_file: invalid credential mapping", i)
+		}
+		domain.Credentials = credentials
+	}
+	return nil
+}
+
+func checkConfig(path string) error {
+	if _, err := loadConfig(path); err != nil {
+		return err
+	}
+	return nil
 }
 
 func boolDefault(value *bool, defaultValue bool) bool {
@@ -120,11 +174,16 @@ func loadOrCreateUser(email, accountDir string) (*MyUser, error) {
 		}
 		key = generated
 		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(generated)})
-		if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		temp, err := writeTempFile(accountDir, ".account-key-*", keyPEM)
+		if err != nil {
 			return nil, fmt.Errorf("write account key: %w", err)
 		}
+		defer os.Remove(temp)
+		if err := replaceFile(temp, keyPath); err != nil {
+			return nil, fmt.Errorf("commit account key: %w", err)
+		}
 	}
-	user := &MyUser{Email: email, key: key}
+	user := &MyUser{Email: email, key: key, accountDir: accountDir}
 	return user, nil
 }
 
@@ -154,20 +213,32 @@ func certNeedRenew(certPath string) (time.Duration, time.Time, error) {
 	return remain, cert.NotAfter, nil
 }
 
-func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks []string, renewBeforeDays int, emailService *notification.EmailService, acmeDirectoryURL string, dnsResolvers []string) error {
+func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks []string, structuredHooks []HookConfig, renewBeforeDays int, emailService *notification.EmailService, acmeDirectoryURL string, dnsResolvers []string) error {
 	if len(domain.Names) == 0 {
 		return errors.New("configuration: domain names cannot be empty")
 	}
+	if pending, summary, err := deployPendingCertificate(certDir, domain.Names, hooks, structuredHooks); err != nil {
+		return fmt.Errorf("deployment retry: %w", err)
+	} else if pending {
+		log.Printf("域名 %v: %s", domain.Names, summary)
+		pendingCertPath, pendingKeyPath := certPaths(certDir, domain.Names)
+		if status, inspectErr := inspectCertificatePair(pendingCertPath, pendingKeyPath, domain.Names, renewBeforeDays); inspectErr == nil {
+			state, _ := loadDeploymentState(certDir, domain.Names)
+			sendRenewalSuccessOnce(emailService, certDir, domain.Names, status, summary, state.CurrentVersion)
+		}
+		return nil
+	}
 	certPath, keyPath := certPaths(certDir, domain.Names)
-	remain, notAfter, err := certNeedRenew(certPath)
+	status, err := inspectCertificatePair(certPath, keyPath, domain.Names, renewBeforeDays)
 	if err != nil {
 		return fmt.Errorf("certificate inspection: %w", err)
 	}
-	if remain == 0 || remain < time.Duration(renewBeforeDays)*24*time.Hour {
-		if notAfter.IsZero() {
-			log.Printf("证书 %v 不存在或解析失败，准备申请...", domain.Names)
+	sendExpiryNotificationOnce(emailService, certDir, domain.Names, status, renewBeforeDays)
+	if status.NeedsRenew {
+		if status.NotAfter.IsZero() {
+			log.Printf("证书 %v 需要申请，原因=%s", domain.Names, status.Reason)
 		} else {
-			log.Printf("证书 %v 剩余有效期 %v, 到期时间 %v，准备续期...", domain.Names, remain, notAfter.Format("2006-01-02 15:04:05"))
+			log.Printf("证书 %v 需要更新，原因=%s 剩余有效期=%v 到期时间=%v", domain.Names, status.Reason, status.Remaining, status.NotAfter.Format("2006-01-02 15:04:05"))
 		}
 		provider, err := providers.GetDNSProvider(domain)
 		if err != nil {
@@ -176,6 +247,9 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 		config := lego.NewConfig(user)
 		if acmeDirectoryURL != "" {
 			config.CADirURL = acmeDirectoryURL
+		}
+		if err := loadRegistrationForCA(user, config.CADirURL); err != nil {
+			return fmt.Errorf("load ACME registration: %w", err)
 		}
 		client, err := lego.NewClient(config)
 		if err != nil {
@@ -195,6 +269,9 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 				return fmt.Errorf("ACME account registration: %w", err)
 			}
 			user.Registration = reg
+			if err := saveRegistrationForCA(user, config.CADirURL); err != nil {
+				return fmt.Errorf("persist ACME registration: %w", err)
+			}
 		}
 
 		request := certificate.ObtainRequest{
@@ -205,54 +282,42 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 		if err != nil {
 			return fmt.Errorf("validation/issuance: %w", err)
 		}
-		hookSummary, err := installAndDeploy(certPath, keyPath, certs.Certificate, certs.PrivateKey, hooks, domain.Names[0])
+		if err := savePendingCertificate(certDir, domain.Names, certs.Certificate, certs.PrivateKey); err != nil {
+			return fmt.Errorf("certificate persistence: %w", err)
+		}
+		_, hookSummary, err := deployPendingCertificate(certDir, domain.Names, hooks, structuredHooks)
 		if err != nil {
-			return err
+			return fmt.Errorf("deployment: %w", err)
 		}
 		log.Printf("证书 %v 已更新并完成部署步骤\n", domain.Names)
 
 		// 获取新证书信息并发送成功通知
-		if emailService != nil && emailService.IsEnabled() {
-			newRemain, newNotAfter, _ := certNeedRenew(certPath)
-			notificationData := notification.NotificationData{
-				Domains:     domain.Names,
-				Success:     true,
-				Timestamp:   time.Now(),
-				HookSummary: hookSummary,
-			}
-			if newRemain > 0 {
-				notificationData.CertExpiry = &newNotAfter
-				notificationData.Remaining = &newRemain
-			}
-			if emailErr := emailService.SendSuccessNotification(notificationData); emailErr != nil {
-				log.Printf("[警告] 邮件通知发送失败: %v", emailErr)
-			}
-		}
+		newStatus, _ := inspectCertificatePair(certPath, keyPath, domain.Names, renewBeforeDays)
+		state, _ := loadDeploymentState(certDir, domain.Names)
+		sendRenewalSuccessOnce(emailService, certDir, domain.Names, newStatus, hookSummary, state.CurrentVersion)
 	} else {
-		log.Printf("证书 %v 有效，无需续期，剩余 %v，到期时间 %v\n", domain.Names, remain, notAfter.Format("2006-01-02 15:04:05"))
-
-		// 检查是否需要发送即将到期警告（可选功能）
-		if emailService != nil && emailService.IsEnabled() && shouldSendExpiryWarning(remain, renewBeforeDays) {
-			notificationData := notification.NotificationData{
-				Domains:    domain.Names,
-				Success:    true,
-				Timestamp:  time.Now(),
-				CertExpiry: &notAfter,
-				Remaining:  &remain,
-			}
-			if emailErr := emailService.SendExpiryWarningNotification(notificationData); emailErr != nil {
-				log.Printf("[警告] 即将到期邮件通知发送失败: %v", emailErr)
-			}
-		}
+		log.Printf("证书 %v 有效，无需续期，剩余 %v，到期时间 %v\n", domain.Names, status.Remaining, status.NotAfter.Format("2006-01-02 15:04:05"))
+		state, _ := loadDeploymentState(certDir, domain.Names)
+		sendRenewalSuccessOnce(emailService, certDir, domain.Names, status, "此前成功事件通知重试", state.CurrentVersion)
 	}
 	return nil
 }
 
 func installAndDeploy(certPath, keyPath string, certPEM, keyPEM []byte, hooks []string, domain string) (string, error) {
+	return installAndDeployConfigured(certPath, keyPath, certPEM, keyPEM, hooks, nil, domain)
+}
+
+func installAndDeployConfigured(certPath, keyPath string, certPEM, keyPEM []byte, hooks []string, structuredHooks []HookConfig, domain string) (string, error) {
 	if err := saveCertificatePair(certPath, keyPath, certPEM, keyPEM); err != nil {
 		return "", fmt.Errorf("certificate persistence: %w", err)
 	}
-	summary, err := runPostRenewHooks(hooks, domain, certPath, keyPath)
+	var summary string
+	var err error
+	if len(structuredHooks) > 0 {
+		summary, err = runStructuredHooks(structuredHooks, domain, certPath, keyPath)
+	} else {
+		summary, err = runPostRenewHooks(hooks, domain, certPath, keyPath)
+	}
 	if err != nil {
 		return summary, fmt.Errorf("deployment: %w", err)
 	}
@@ -437,6 +502,8 @@ func runPostRenewHooks(hooks []string, domain, certPath, keyPath string) (string
 }
 
 func run(configPath string) error {
+	runID := fmt.Sprintf("%x", time.Now().UnixNano())
+	log.Printf("run=%s stage=start config=%s", runID, configPath)
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("配置文件加载失败: %w", err)
@@ -511,14 +578,23 @@ func run(configPath string) error {
 
 	var failures []error
 	process := func(d providers.Domain) {
-		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, renewBefore, emailService, cfg.ACMEDirectoryURL, resolvers); err != nil {
-			log.Printf("[错误] 域名 %v 证书处理失败: %v", d.Names, err)
+		started := time.Now()
+		certificateID := filepath.Base(certificateStateDir(cfg.CertDir, d.Names))
+		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, cfg.Hooks, renewBefore, emailService, cfg.ACMEDirectoryURL, resolvers); err != nil {
+			log.Printf("run=%s certificate=%s stage=complete result=failed category=%s duration=%s domains=%v error=%v", runID, certificateID, failureCategory(err), time.Since(started), d.Names, err)
 			if d.Provider == "hurricane" {
 				if advice := hurricaneFailureAdvice(err, d.Names); advice != "" {
 					log.Printf("[Hurricane Electric] 诊断建议: %s", advice)
 				}
 			}
 			if emailService != nil && emailService.IsEnabled() {
+				now := time.Now()
+				category := failureCategory(err)
+				ledger, due := failureNotificationDue(cfg.CertDir, d.Names, category, now)
+				if !due {
+					failures = append(failures, fmt.Errorf("%v: %w", d.Names, err))
+					return
+				}
 				advice := ""
 				if d.Provider == "hurricane" {
 					advice = hurricaneFailureAdvice(err, d.Names)
@@ -532,10 +608,14 @@ func run(configPath string) error {
 				}
 				if emailErr := emailService.SendFailureNotification(notificationData); emailErr != nil {
 					log.Printf("[警告] 邮件通知发送失败: %v", emailErr)
+				} else if stateErr := markFailureNotification(cfg.CertDir, d.Names, ledger, category, now); stateErr != nil {
+					log.Printf("[警告] 失败通知去重状态保存失败: %v", stateErr)
 				}
 			}
 			failures = append(failures, fmt.Errorf("%v: %w", d.Names, err))
+			return
 		}
+		log.Printf("run=%s certificate=%s stage=complete result=success duration=%s domains=%v", runID, certificateID, time.Since(started), d.Names)
 	}
 	for _, d := range otherDomains {
 		process(d)
@@ -547,8 +627,10 @@ func run(configPath string) error {
 	}
 	log.Printf("处理汇总: 总计=%d 成功=%d 失败=%d", len(cfg.Domains), len(cfg.Domains)-len(failures), len(failures))
 	if len(failures) > 0 {
+		log.Printf("run=%s stage=finish result=failed failures=%d", runID, len(failures))
 		return fmt.Errorf("处理完成，共 %d 组域名失败: %w", len(failures), errors.Join(failures...))
 	}
+	log.Printf("run=%s stage=finish result=success", runID)
 	return nil
 }
 
@@ -585,16 +667,44 @@ func normalizeResolvers(values []string) ([]string, error) {
 func main() {
 	log.Printf("程序启动: %s", time.Now().Format("2006-01-02 15:04:05"))
 	sslDomain := flag.String("ssl-domain", "", "检查远程主机(域名)的TLS证书信息")
+	sslServerName := flag.String("ssl-server-name", "", "远程 TLS 诊断使用的显式 SNI/主机名校验名称")
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
+	checkConfigOnly := flag.Bool("check-config", false, "只校验配置，不申请证书或执行 hook")
 	flag.Parse()
 
+	if *checkConfigOnly {
+		if *sslDomain != "" || *sslServerName != "" {
+			log.Printf("[失败] -check-config 与 -ssl-domain 不能同时使用")
+			os.Exit(2)
+		}
+		if err := checkConfig(*configPath); err != nil {
+			log.Printf("[配置无效] %v", err)
+			os.Exit(2)
+		}
+		log.Printf("配置有效: %s", *configPath)
+		return
+	}
+
 	if *sslDomain != "" {
-		err := checkRemoteDomain(*sslDomain)
+		var err error
+		if *sslServerName == "" {
+			err = checkRemoteDomain(*sslDomain)
+		} else {
+			var endpoint remoteEndpoint
+			endpoint, err = parseRemoteEndpoint(*sslDomain)
+			if err == nil {
+				err = checkRemoteEndpoint(endpoint, *sslServerName)
+			}
+		}
 		if err != nil {
 			fmt.Printf("检查远程域名失败: %v\n", err)
 			os.Exit(2)
 		}
 		os.Exit(0)
+	}
+	if *sslServerName != "" {
+		log.Printf("[失败] -ssl-server-name 必须与 -ssl-domain 一起使用")
+		os.Exit(2)
 	}
 
 	if err := run(*configPath); err != nil {

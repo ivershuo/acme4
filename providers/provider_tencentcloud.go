@@ -1,7 +1,8 @@
 package providers
 
 import (
-	"os"
+	"fmt"
+
 	"github.com/go-acme/lego/v4/challenge"
 	"github.com/go-acme/lego/v4/providers/dns/tencentcloud"
 )
@@ -11,7 +12,14 @@ func init() {
 }
 
 func newTencentcloudProvider(domain Domain) (challenge.Provider, error) {
-	os.Setenv("TENCENTCLOUD_SECRET_ID", domain.Credentials["secret_id"])
-	os.Setenv("TENCENTCLOUD_SECRET_KEY", domain.Credentials["secret_key"])
-	return tencentcloud.NewDNSProvider()
+	secretID, secretKey := domain.Credentials["secret_id"], domain.Credentials["secret_key"]
+	if secretID == "" || secretKey == "" {
+		return nil, fmt.Errorf("tencentcloud: credentials.secret_id and credentials.secret_key are required")
+	}
+	config := tencentcloud.NewDefaultConfig()
+	config.SecretID = secretID
+	config.SecretKey = secretKey
+	config.SessionToken = domain.Credentials["session_token"]
+	config.Region = domain.Credentials["region"]
+	return tencentcloud.NewDNSProviderConfig(config)
 }

@@ -6,12 +6,14 @@ import (
 	"time"
 
 	"github.com/go-acme/lego/v4/challenge"
+	"github.com/go-acme/lego/v4/challenge/dns01"
 )
 
 type Domain struct {
-	Names       []string          `yaml:"names"`
-	Provider    string            `yaml:"provider"`
-	Credentials map[string]string `yaml:"credentials"`
+	Names           []string          `yaml:"names"`
+	Provider        string            `yaml:"provider"`
+	Credentials     map[string]string `yaml:"credentials"`
+	CredentialsFile string            `yaml:"credentials_file"`
 }
 
 type DNSProviderFactory func(domain Domain) (challenge.Provider, error)
@@ -23,6 +25,14 @@ func RegisterProvider(name string, factory DNSProviderFactory) {
 	providerRegistry[name] = factory
 }
 
+// IsSupported reports whether a provider has been registered. It lets callers
+// validate configuration before they initialize a provider (which may perform
+// network setup or read credentials).
+func IsSupported(name string) bool {
+	_, ok := providerRegistry[name]
+	return ok
+}
+
 // LoggingDNSProvider wraps a challenge.Provider and prints DNS instructions on Present
 // Useful for manual intervention if DNS write fails or for debugging
 
@@ -32,7 +42,8 @@ type LoggingDNSProvider struct {
 }
 
 func (l *LoggingDNSProvider) Present(domain, token, keyAuth string) error {
-	log.Printf("[DNS] action=present domain=%s", domain)
+	info := dns01.GetChallengeInfo(domain, keyAuth)
+	log.Printf("[DNS] action=present domain=%s challenge=%s target=%s", domain, info.FQDN, info.EffectiveFQDN)
 	return l.wrapped.Present(domain, token, keyAuth)
 }
 

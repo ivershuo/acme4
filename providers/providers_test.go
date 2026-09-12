@@ -1,7 +1,11 @@
 package providers
 
 import (
+	"bytes"
+	"errors"
+	"log"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +18,19 @@ var _ challenge.ProviderTimeout = (*providerStub)(nil)
 type providerStub struct {
 	presentCalls int
 	cleanupCalls int
+	cleanupErr   error
+}
+
+type recordProviderStub struct{ records map[string]bool }
+
+func (p *recordProviderStub) Present(_, token, _ string) error {
+	p.records[token] = true
+	return nil
+}
+
+func (p *recordProviderStub) CleanUp(_, token, _ string) error {
+	delete(p.records, token)
+	return nil
 }
 
 func TestParseCredentialPairsSupportsCurrentAndLegacySeparators(t *testing.T) {
@@ -43,6 +60,55 @@ func TestCloudflareFactoryRequiresToken(t *testing.T) {
 	}
 }
 
+func TestProviderFactoriesDoNotMutateCredentialEnvironment(t *testing.T) {
+	t.Setenv("TENCENTCLOUD_SECRET_ID", "original-id")
+	t.Setenv("TENCENTCLOUD_SECRET_KEY", "original-key")
+	if _, err := newTencentcloudProvider(Domain{Credentials: map[string]string{"secret_id": "configured-id", "secret_key": "configured-key"}}); err != nil {
+		t.Fatalf("newTencentcloudProvider() error = %v", err)
+	}
+	if os.Getenv("TENCENTCLOUD_SECRET_ID") != "original-id" || os.Getenv("TENCENTCLOUD_SECRET_KEY") != "original-key" {
+		t.Fatal("TencentCloud factory changed credential environment")
+	}
+
+	t.Setenv("PORKBUN_API_KEY", "original-api")
+	t.Setenv("PORKBUN_SECRET_API_KEY", "original-secret")
+	if _, err := newPorkbunProvider(Domain{Credentials: map[string]string{"api_key": "configured-api", "secret_api_key": "configured-secret"}}); err != nil {
+		t.Fatalf("newPorkbunProvider() error = %v", err)
+	}
+	if os.Getenv("PORKBUN_API_KEY") != "original-api" || os.Getenv("PORKBUN_SECRET_API_KEY") != "original-secret" {
+		t.Fatal("Porkbun factory changed credential environment")
+	}
+}
+
+func TestProviderFactoriesInitializeConcurrentlyWithoutCredentialCrosstalk(t *testing.T) {
+	domains := []Domain{
+		{Provider: "cloudflare", Credentials: map[string]string{"api_token": "cf-one"}},
+		{Provider: "cloudflare", Credentials: map[string]string{"api_token": "cf-two"}},
+		{Provider: "hurricane", Credentials: map[string]string{"api_key": "example.com:he-one"}},
+		{Provider: "hurricane", Credentials: map[string]string{"api_key": "example.net:he-two"}},
+		{Provider: "porkbun", Credentials: map[string]string{"api_key": "pb-one", "secret_api_key": "pbs-one"}},
+		{Provider: "tencentcloud", Credentials: map[string]string{"secret_id": "tc-one", "secret_key": "tcs-one"}},
+	}
+	var wg sync.WaitGroup
+	errorsCh := make(chan error, len(domains))
+	for _, domain := range domains {
+		domain := domain
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := providerRegistry[domain.Provider](domain)
+			errorsCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatalf("concurrent provider initialization: %v", err)
+		}
+	}
+}
+
 func (p *providerStub) Present(domain, token, keyAuth string) error {
 	p.presentCalls++
 	return nil
@@ -50,7 +116,40 @@ func (p *providerStub) Present(domain, token, keyAuth string) error {
 
 func (p *providerStub) CleanUp(domain, token, keyAuth string) error {
 	p.cleanupCalls++
-	return nil
+	return p.cleanupErr
+}
+
+func TestLoggingDNSProviderLabelsCleanupWarnings(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	want := errors.New("delete failed")
+	provider := &LoggingDNSProvider{wrapped: &providerStub{cleanupErr: want}}
+	if err := provider.CleanUp("example.com", "token", "key"); !errors.Is(err, want) {
+		t.Fatalf("cleanup error = %v", err)
+	}
+	if !bytes.Contains(output.Bytes(), []byte("[清理警告]")) {
+		t.Fatalf("cleanup warning not labeled: %s", output.String())
+	}
+}
+
+func TestLoggingProviderPreservesPerChallengeCleanupIdentity(t *testing.T) {
+	t.Setenv("LEGO_DISABLE_CNAME_SUPPORT", "true")
+	wrapped := &recordProviderStub{records: map[string]bool{}}
+	provider := &LoggingDNSProvider{wrapped: wrapped}
+	if err := provider.Present("example.com", "root-token", "root-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Present("example.com", "wildcard-token", "wildcard-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.CleanUp("example.com", "root-token", "root-key"); err != nil {
+		t.Fatal(err)
+	}
+	if wrapped.records["root-token"] || !wrapped.records["wildcard-token"] {
+		t.Fatalf("cleanup removed wrong TXT identity: %#v", wrapped.records)
+	}
 }
 
 func (p *providerStub) Timeout() (time.Duration, time.Duration) {
