@@ -12,7 +12,7 @@ go build -o hooks/tencent-upload-cert/tencent-upload-cert ./hooks/tencent-upload
 
 ## 使用方式
 
-推荐使用结构化 `hooks` 显式传入当前证书、私钥和别名，并通过权限为 `0600` 的 `env_file` 提供凭据：
+推荐使用结构化 `hooks` 显式传入当前不可变版本的证书、私钥和别名，并通过 group/other 无权限（例如 `0600` 或 `0400`）的 `env_file` 提供凭据：
 
 ```yaml
 hooks:
@@ -23,10 +23,16 @@ hooks:
     env_file: /etc/acme4/tencent-upload.env
 ```
 
-运行任务的服务用户需要预先配置 `TENCENTCLOUD_SECRET_ID` 和
-`TENCENTCLOUD_SECRET_KEY`；不要把 `SecretKey` 写入 hook 命令。
+`env_file` 不执行 shell，也不展开变量；内容应为：
 
-旧 `post_renew_hooks` 字符串模式仍兼容，但会经过 shell，并可能在日志中显示展开后的命令。
+```text
+TENCENTCLOUD_SECRET_ID=AKID...
+TENCENTCLOUD_SECRET_KEY=...
+```
+
+相对 `env_file` 路径按 acme4 进程工作目录解析。也可以在直接运行上传工具时预先设置这两个环境变量；不要把 `SecretKey` 写入 hook 命令。
+
+旧 `post_renew_hooks` 字符串模式仍兼容，但会经过 shell，没有结构化 hook 的超时、输出限制和脱敏保证，并可能在日志中显示展开后的命令。
 
 占位符由 `acme4` 主程序替换：
 
@@ -60,7 +66,7 @@ hooks:
 
 - `--alias`：上传到腾讯云时使用的证书别名
 
-如果没有指定 `--alias`，程序会默认使用 `--domain`，或者从 `--cert` 文件名推导。
+如果没有指定 `--alias`，程序会默认使用 `--domain`，或者使用 `--cert` 的完整文件名（包含扩展名）作为别名。生产配置建议显式传入 `--alias`。
 
 ## 凭证
 

@@ -34,26 +34,7 @@ ACME4 支持通过 [Resend](https://resend.com/) 服务发送邮件通知，可�
 4. 点击 "Add"
 
 ### 2.2 配置 DNS 记录
-Resend 会提供需要添加的 DNS 记录，通常包括：
-
-```
-类型: TXT
-名称: @
-值: resend-verification=xxxxxxxx
-
-类型: MX  
-名称: @
-值: feedback-smtp.resend.com
-优先级: 10
-
-类型: TXT
-名称: @
-值: v=spf1 include:_spf.resend.com ~all
-
-类型: TXT
-名称: resend._domainkey
-值: p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
-```
+Resend 会在控制台为当前域名给出需要添加的记录。请逐项复制控制台显示的名称、类型和值，不要照抄其他域名或旧文档中的固定记录；具体记录可能随区域和产品配置变化。
 
 ### 2.3 验证域名状态
 - 添加 DNS 记录后，等待几分钟到几小时
@@ -83,12 +64,11 @@ domains:
     credentials:
       api_token: "your_cloudflare_token"
 
-cert_dir: "./certs"
-account_dir: "./accounts"
+cert_dir: "/var/lib/acme4/certs"
+account_dir: "/var/lib/acme4/accounts"
 renew_before: 30
 
-post_renew_hooks:
-  - "nginx -s reload"
+post_renew_hooks: [] # 示例默认不执行生产部署动作
 
 # 邮件通知配置
 email_notification:
@@ -109,7 +89,7 @@ email_notification:
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `enabled` | 是 | 是否启用邮件通知 |
-| `resend_api_key` | 是 | Resend API Key，格式为 `re_xxxxxx` |
+| `resend_api_key` | 是 | Resend API Key，通常以 `re_` 开头；程序只校验非空，真实性由 Resend 在发送时验证 |
 | `from_email` | 是 | 发件邮箱，必须使用已验证域名 |
 | `from_name` | 否 | 发件人显示名称 |
 | `to_emails` | 是 | 收件人邮箱列表（数组） |
@@ -117,40 +97,29 @@ email_notification:
 | `notify_on_failure` | 否 | 失败时是否发送通知，未配置时默认 true，显式设置 false 可关闭 |
 | `notify_on_expiry` | 否 | 即将到期时是否发送通知，未配置时默认 true，显式设置 false 可关闭 |
 
-## 步骤5: 测试邮件功能
+主配置文件不会展开 `${ENV_VAR}`。`resend_api_key` 必须出现在最终 YAML 中，因此应将生产配置置于版本库之外并设置为 `0600`，或由配置管理/密钥管理系统在启动前生成该文件。provider 的 DNS 凭据可以使用 `credentials_file`，但该字段目前不适用于 `email_notification`。
 
-### 5.1 使用测试脚本
+## 步骤5: 验证邮件功能
+
+### 5.1 验证配置与单元测试
 
 ```bash
-# 测试成功通知
-go run test_email.go \
-  -api-key="re_your_api_key_here" \
-  -from="acme4@yourdomain.com" \
-  -to="admin@yourdomain.com" \
-  -type="success"
+# 只读校验严格 YAML 和邮件配置，不发送邮件、不访问 DNS/CA
+./acme4 -check-config -config=config.yaml
 
-# 测试失败通知  
-go run test_email.go \
-  -api-key="re_your_api_key_here" \
-  -from="acme4@yourdomain.com" \
-  -to="admin@yourdomain.com" \
-  -type="failure"
-
-# 测试到期提醒
-go run test_email.go \
-  -api-key="re_your_api_key_here" \
-  -from="acme4@yourdomain.com" \
-  -to="admin@yourdomain.com" \
-  -type="expiry"
+# 验证邮件模板、开关和 15 秒请求超时等自动测试
+go test ./notification
 ```
 
-### 5.2 运行 ACME4 测试
+当前主程序没有“只发送一封测试邮件”的独立子命令。不要使用旧的 `go run test_email.go` 示例；该文件不是受支持的可执行入口。
+
+### 5.2 验证真实投递
 
 ```bash
 ./acme4 -config=config.yaml
 ```
 
-观察日志输出，确认邮件服务启用：
+真实投递测试会执行正常证书处理流程。应使用独立 staging CA、`account_dir`、`cert_dir`，禁用所有生产 hook，并使用专门的测试收件人。观察日志确认邮件服务启用：
 
 ```
 邮件通知服务已启用，收件人: [admin@yourdomain.com ops@yourdomain.com]
@@ -219,16 +188,15 @@ go run test_email.go \
 
 正常情况下的日志示例：
 ```
-2024-01-15 10:30:15 邮件通知服务已启用，收件人: [admin@example.com]
-2024-01-15 10:30:20 证书 [example.com *.example.com] 已更新
-2024-01-15 10:30:22 邮件发送成功，ID: 550e8400-e29b-41d4-a716-446655440000，收件人: admin@example.com
+2026-09-12 10:30:15 邮件通知服务已启用，收件人: [admin@example.com]，成功通知: true，失败通知: true，到期提醒: true
+2026-09-12 10:30:20 证书 [example.com *.example.com] 已更新并完成部署步骤
+2026-09-12 10:30:22 邮件发送成功，ID: 550e8400-e29b-41d4-a716-446655440000，收件人: admin@example.com
 ```
 
 错误情况下的日志示例：
 ```
-2024-01-15 10:30:15 邮件通知服务已启用，收件人: [admin@example.com]  
-2024-01-15 10:30:20 证书 [example.com *.example.com] 已更新
-2024-01-15 10:30:22 [警告] 邮件通知发送失败: API key is invalid
+2026-09-12 10:30:15 邮件通知服务已启用，收件人: [admin@example.com]，成功通知: true，失败通知: true，到期提醒: true
+2026-09-12 10:30:20 [警告] 邮件通知发送失败: API key is invalid
 ```
 
 ## 安全建议
@@ -236,7 +204,7 @@ go run test_email.go \
 ### 1. API Key 管理
 - **不要**将 API Key 提交到版本控制系统
 - 定期轮换 API Key
-- 使用环境变量存储敏感信息
+- 将包含密钥的最终配置置于版本库之外，并限制文件权限
 
 ### 2. 权限控制
 - 为 ACME4 创建专用的 API Key
@@ -254,23 +222,9 @@ echo "config.yaml" >> .gitignore
 
 ## 高级配置
 
-### 环境变量支持
+### 密钥注入边界
 
-可以通过环境变量设置敏感信息：
-
-```bash
-export RESEND_API_KEY="re_your_api_key_here"
-export ACME4_FROM_EMAIL="acme4@yourdomain.com"
-```
-
-然后在配置文件中引用：
-```yaml
-email_notification:
-  enabled: true
-  resend_api_key: "${RESEND_API_KEY}"
-  from_email: "${ACME4_FROM_EMAIL}"
-  # ... 其他配置
-```
+ACME4 当前不解析 shell 风格的环境变量占位符。若部署平台以环境变量或密钥存储提供 Resend 凭据，应在启动 ACME4 之前用受控模板流程生成权限为 `0600` 的最终 YAML；不要把 `${RESEND_API_KEY}` 原样写入配置并期待程序展开，也不要把生成后的文件提交到版本控制。
 
 ### 多环境配置
 
@@ -294,12 +248,16 @@ config.prod.yaml
 
 ## 费用说明
 
-Resend 提供免费额度：
-- 每月 3,000 封免费邮件
-- 100 个已验证域名
-- 标准支持
+Resend 的免费额度、每日限制和可验证域名数量可能调整。部署前请查看 [Resend 当前价格页](https://resend.com/pricing)，不要依赖本文保存的固定额度。
 
-对于 ACME4 的使用场景（证书续期通知），免费额度通常足够使用。
+## 通知语义与限制
+
+- 续签成功事件按证书版本去重；投递未确认成功时会在后续运行重试。
+- 临期提醒覆盖进入续签窗口前 7、3、1 天，以及实际到期前 7、3、1 天和已过期状态；一次漏跑跨过多个阈值时只补最高紧迫级别。
+- 同一失败类别默认 24 小时最多通知一次；失败类别变化会立即通知。通知状态保存在对应证书的 `cert_dir/.acme4/` 状态目录。
+- 邮件发送失败只记录警告，不会把已经成功的签发或部署改判为失败。
+- 配置 YAML 无法解析、邮件配置本身无效或邮件服务初始化前发生的错误无法通过该配置发送邮件；必须依靠进程退出码和日志监控兜底。
+- API 请求总超时为 15 秒。发送接口响应丢失时无法保证严格“恰好一次”，收件人可能收到重复邮件。
 
 ## 技术支持
 
@@ -312,4 +270,4 @@ Resend 提供免费额度：
 
 ---
 
-*本指南适用于 ACME4 v1.0+，如有更新请参考最新文档。*
+*本指南与当前仓库实现同步；升级依赖或通知逻辑后应同时复核本文。*

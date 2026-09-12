@@ -168,7 +168,14 @@ func equalStrings(a, b []string) bool {
 }
 
 func TestSampleConfigurationParsesAndValidates(t *testing.T) {
-	if _, err := loadConfig("config.sample.yaml"); err != nil {
+	cfg, err := loadConfig("config.sample.yaml")
+	if err != nil {
 		t.Fatalf("config.sample.yaml is invalid: %v", err)
+	}
+	if len(cfg.PostRenewHooks) != 0 || len(cfg.Hooks) != 0 {
+		t.Fatal("config.sample.yaml must not execute deployment hooks by default")
+	}
+	if cfg.EmailNotification != nil && cfg.EmailNotification.Enabled {
+		t.Fatal("config.sample.yaml must not send email with placeholder credentials by default")
 	}
 }

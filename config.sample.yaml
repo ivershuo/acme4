@@ -6,9 +6,12 @@ domains:
   - names: ["example.com", "*.example.com"]
     provider: "cloudflare"
     credentials:
-      # Token 仅需专用验证 zone 的 DNS 编辑 + Zone 读取权限。
+      # 单 token 方式：仅覆盖专用验证 zone，并具有 DNS Write + Zone Read。
       api_token: "CF_VALIDATION_ZONE_TOKEN"
-    # 也可改用仅当前用户可读（0600）的 YAML 文件；不能与 credentials 同时使用：
+      # 拆分 token 时，api_token 只需 DNS Write，下面的 token 只需 Zone Read：
+      # zone_api_token: "CF_VALIDATION_ZONE_READ_TOKEN"
+    # 也可删除上面的 credentials，改用 group/other 无权限（0600 或 0400）的
+    # 严格 YAML 文件；credentials_file 相对路径按本配置文件目录解析：
     # credentials_file: "/etc/acme4/cloudflare-credentials.yaml"
   - names: ["example.net"]
     provider: "hurricane"
@@ -45,17 +48,18 @@ cert_dir: "/var/lib/acme4/certs"
 account_dir: "/var/lib/acme4/accounts"
 renew_before: 30 # 证书到期前多少天开始续期，默认30天
 # 可选。省略时使用当前生产 CA；staging 必须同时使用独立的
-# cert_dir、account_dir，并关闭 post_renew_hooks（见 README）。
+# cert_dir、account_dir，并关闭 post_renew_hooks 和 hooks（见 README）。
 # acme_directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"
 dns_resolvers:
   - "8.8.8.8:53"   # 可选，指定 DNS 检测解析器；支持 IPv4/IPv6 和端口
   - "1.1.1.1:53"
   # - "[2001:4860:4860::8888]:53"
-post_renew_hooks:
-  - "nginx -s reload"
-  # 内置 hook 示例：上传当前证书到腾讯云 SSL 证书服务
-  # - "./hooks/tencent-upload-cert/tencent-upload-cert --cert {cert_path} --key {key_path} --alias {domain}"
-  # - "systemctl reload haproxy"
+post_renew_hooks: []
+# 默认不执行生产部署动作；确认路径和权限后，用下列配置替换上面的空列表。
+# post_renew_hooks:
+#   - "nginx -s reload"
+#   - "./hooks/tencent-upload-cert/tencent-upload-cert --cert {cert_path} --key {key_path} --alias {domain}"
+#   - "systemctl reload haproxy"
 
 # 推荐的新结构化 hook；与 post_renew_hooks 二选一。参数不会再次经过 shell 解析。
 # hooks:
@@ -67,11 +71,11 @@ post_renew_hooks:
 #     command: "/opt/acme4/tencent-upload-cert"
 #     args: ["--cert", "{cert_path}", "--key", "{key_path}", "--alias", "{domain}"]
 #     timeout: "30s"
-#     env_file: "/etc/acme4/tencent-upload.env" # 必须为普通文件且权限不宽于 0600
+#     env_file: "/etc/acme4/tencent-upload.env" # group/other 必须无权限；相对路径按工作目录解析
 
 # 邮件通知配置（可选）
 email_notification:
-  enabled: true
+  enabled: false # 填好并验证 Resend 配置后再启用
   resend_api_key: "re_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
   from_email: "acme4@yourdomain.com" # 必须是已验证域名的邮箱
   from_name: "ACME4 Certificate Manager"
@@ -81,4 +85,4 @@ email_notification:
   # 通知类型配置
   notify_on_success: true # 证书续期成功时发送通知
   notify_on_failure: true # 证书续期失败时发送通知
-  notify_on_expiry: true # 证书即将到期时发送通知（可选功能）
+  notify_on_expiry: true # 续签窗口前及实际到期前 7/3/1 天和过期提醒
