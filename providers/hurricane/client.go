@@ -75,18 +75,18 @@ func NewClient(credentials map[string]string) *Client {
 
 // UpdateTxtRecord updates a TXT record.
 func (c *Client) UpdateTxtRecord(ctx context.Context, hostname, txt string) error {
-	domain := strings.TrimPrefix(hostname, "_acme-challenge.")
-
 	c.credMu.Lock()
-	token, ok := c.credentials[domain]
+	// A full record credential is the most specific setting and must override
+	// the domain-wide fallback.
+	token, ok := c.credentials[hostname]
 	if !ok {
-		// Try with the full hostname if the domain key is not found
-		token, ok = c.credentials[hostname]
+		domain := strings.TrimPrefix(hostname, "_acme-challenge.")
+		token, ok = c.credentials[domain]
 	}
 	c.credMu.Unlock()
 
 	if !ok {
-		return fmt.Errorf("domain %s (or %s) not found in credentials, check your credentials map", domain, hostname)
+		return fmt.Errorf("hostname %s not found in credentials (full hostname or domain key), check your credentials map", hostname)
 	}
 
 	data := url.Values{}

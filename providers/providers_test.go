@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -13,6 +14,33 @@ var _ challenge.ProviderTimeout = (*providerStub)(nil)
 type providerStub struct {
 	presentCalls int
 	cleanupCalls int
+}
+
+func TestParseCredentialPairsSupportsCurrentAndLegacySeparators(t *testing.T) {
+	got, err := parseCredentialPairs("example.com:domain-token,_acme-challenge.example.com=record-token")
+	if err != nil {
+		t.Fatalf("parseCredentialPairs() error = %v", err)
+	}
+	if got["example.com"] != "domain-token" || got["_acme-challenge.example.com"] != "record-token" {
+		t.Fatalf("parseCredentialPairs() = %#v", got)
+	}
+}
+
+func TestCloudflareFactoryDoesNotMutateCredentialEnvironment(t *testing.T) {
+	t.Setenv("CLOUDFLARE_DNS_API_TOKEN", "environment-token")
+	_, err := newCloudflareProvider(Domain{Credentials: map[string]string{"api_token": "configured-token"}})
+	if err != nil {
+		t.Fatalf("newCloudflareProvider() error = %v", err)
+	}
+	if got := os.Getenv("CLOUDFLARE_DNS_API_TOKEN"); got != "environment-token" {
+		t.Fatalf("environment credential changed to %q", got)
+	}
+}
+
+func TestCloudflareFactoryRequiresToken(t *testing.T) {
+	if _, err := newCloudflareProvider(Domain{}); err == nil {
+		t.Fatal("newCloudflareProvider() expected missing token error")
+	}
 }
 
 func (p *providerStub) Present(domain, token, keyAuth string) error {

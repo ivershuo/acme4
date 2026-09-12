@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/go-acme/lego/v4/challenge"
-	"github.com/go-acme/lego/v4/challenge/dns01"
 )
 
 type Domain struct {
@@ -33,13 +32,16 @@ type LoggingDNSProvider struct {
 }
 
 func (l *LoggingDNSProvider) Present(domain, token, keyAuth string) error {
-	info := dns01.GetChallengeInfo(domain, keyAuth)
-	log.Printf("[手动DNS] 请为域名 %s 添加 TXT 记录：\n  主机: %s\n  类型: TXT\n  值: %s\n", domain, info.FQDN, info.Value)
+	log.Printf("[DNS] action=present domain=%s", domain)
 	return l.wrapped.Present(domain, token, keyAuth)
 }
 
 func (l *LoggingDNSProvider) CleanUp(domain, token, keyAuth string) error {
-	return l.wrapped.CleanUp(domain, token, keyAuth)
+	err := l.wrapped.CleanUp(domain, token, keyAuth)
+	if err != nil {
+		log.Printf("[清理警告] domain=%s provider_cleanup_failed=%v", domain, err)
+	}
+	return err
 }
 
 type loggingDNSProviderTimeout struct {

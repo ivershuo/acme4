@@ -1,23 +1,29 @@
 package main
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-acme/lego/v4/certificate"
+	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
 	"gopkg.in/yaml.v2"
@@ -48,6 +54,7 @@ type Config struct {
 	PostRenewHooks    []string                 `yaml:"post_renew_hooks"`
 	RenewBefore       int                      `yaml:"renew_before"` // 证书到期前多少天续期
 	DNSResolvers      []string                 `yaml:"dns_resolvers"`
+	ACMEDirectoryURL  string                   `yaml:"acme_directory_url"`
 	EmailNotification *EmailNotificationConfig `yaml:"email_notification"`
 }
 
@@ -92,14 +99,30 @@ func loadOrCreateUser(email, accountDir string) (*MyUser, error) {
 	keyPath := filepath.Join(accountDir, email+".key")
 	var key crypto.PrivateKey
 	if _, err := os.Stat(keyPath); err == nil {
-		keyBytes, _ := os.ReadFile(keyPath)
+		keyBytes, err := os.ReadFile(keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read account key: %w", err)
+		}
 		block, _ := pem.Decode(keyBytes)
-		key, _ = x509.ParsePKCS1PrivateKey(block.Bytes)
+		if block == nil {
+			return nil, fmt.Errorf("parse account key: invalid PEM")
+		}
+		key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse account key: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("stat account key: %w", err)
 	} else {
-		key, _ = rsa.GenerateKey(rand.Reader, 2048)
-		keyOut, _ := os.Create(keyPath)
-		defer keyOut.Close()
-		pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key.(*rsa.PrivateKey))})
+		generated, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return nil, fmt.Errorf("generate account key: %w", err)
+		}
+		key = generated
+		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(generated)})
+		if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+			return nil, fmt.Errorf("write account key: %w", err)
+		}
 	}
 	user := &MyUser{Email: email, key: key}
 	return user, nil
@@ -114,7 +137,10 @@ func certPaths(certDir string, names []string) (certPath, keyPath string) {
 func certNeedRenew(certPath string) (time.Duration, time.Time, error) {
 	data, err := os.ReadFile(certPath)
 	if err != nil {
-		return 0, time.Time{}, nil // 文件不存在，视为需要申请
+		if os.IsNotExist(err) {
+			return 0, time.Time{}, nil // 文件不存在，视为需要申请
+		}
+		return 0, time.Time{}, err
 	}
 	block, _ := pem.Decode(data)
 	if block == nil {
@@ -128,30 +154,14 @@ func certNeedRenew(certPath string) (time.Duration, time.Time, error) {
 	return remain, cert.NotAfter, nil
 }
 
-func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks []string, renewBeforeDays int, emailService *notification.EmailService) error {
-	provider, err := providers.GetDNSProvider(domain)
-	if err != nil {
-		return err
+func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks []string, renewBeforeDays int, emailService *notification.EmailService, acmeDirectoryURL string, dnsResolvers []string) error {
+	if len(domain.Names) == 0 {
+		return errors.New("configuration: domain names cannot be empty")
 	}
-	config := lego.NewConfig(user)
-	client, err := lego.NewClient(config)
-	if err != nil {
-		return err
-	}
-	client.Challenge.SetDNS01Provider(provider)
-
-	if user.Registration == nil {
-		reg, err := client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
-		if err != nil {
-			return err
-		}
-		user.Registration = reg
-	}
-
 	certPath, keyPath := certPaths(certDir, domain.Names)
 	remain, notAfter, err := certNeedRenew(certPath)
 	if err != nil {
-		log.Printf("[警告] 证书状态检查失败，域名: %v，原因: %v\n请检查证书文件是否存在且格式正确。", domain.Names, err)
+		return fmt.Errorf("certificate inspection: %w", err)
 	}
 	if remain == 0 || remain < time.Duration(renewBeforeDays)*24*time.Hour {
 		if notAfter.IsZero() {
@@ -159,35 +169,47 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 		} else {
 			log.Printf("证书 %v 剩余有效期 %v, 到期时间 %v，准备续期...", domain.Names, remain, notAfter.Format("2006-01-02 15:04:05"))
 		}
+		provider, err := providers.GetDNSProvider(domain)
+		if err != nil {
+			return fmt.Errorf("provider configuration: %w", err)
+		}
+		config := lego.NewConfig(user)
+		if acmeDirectoryURL != "" {
+			config.CADirURL = acmeDirectoryURL
+		}
+		client, err := lego.NewClient(config)
+		if err != nil {
+			return fmt.Errorf("ACME client initialization: %w", err)
+		}
+		var dnsOptions []dns01.ChallengeOption
+		if len(dnsResolvers) > 0 {
+			dnsOptions = append(dnsOptions, dns01.AddRecursiveNameservers(dnsResolvers))
+		}
+		if err := client.Challenge.SetDNS01Provider(provider, dnsOptions...); err != nil {
+			return fmt.Errorf("DNS-01 configuration: %w", err)
+		}
+
+		if user.Registration == nil {
+			reg, err := client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+			if err != nil {
+				return fmt.Errorf("ACME account registration: %w", err)
+			}
+			user.Registration = reg
+		}
+
 		request := certificate.ObtainRequest{
 			Domains: domain.Names,
 			Bundle:  true,
 		}
 		certs, err := client.Certificate.Obtain(request)
 		if err != nil {
-			// 发送失败通知
-			if emailService != nil && emailService.IsEnabled() {
-				advice := ""
-				if domain.Provider == "hurricane" {
-					advice = hurricaneFailureAdvice(err, domain.Names)
-				}
-				notificationData := notification.NotificationData{
-					Domains:   domain.Names,
-					Success:   false,
-					Error:     err.Error(),
-					Timestamp: time.Now(),
-					Advice:    advice,
-				}
-				if emailErr := emailService.SendFailureNotification(notificationData); emailErr != nil {
-					log.Printf("[警告] 邮件通知发送失败: %v", emailErr)
-				}
-			}
+			return fmt.Errorf("validation/issuance: %w", err)
+		}
+		hookSummary, err := installAndDeploy(certPath, keyPath, certs.Certificate, certs.PrivateKey, hooks, domain.Names[0])
+		if err != nil {
 			return err
 		}
-		_ = os.WriteFile(certPath, certs.Certificate, 0600)
-		_ = os.WriteFile(keyPath, certs.PrivateKey, 0600)
-		log.Printf("证书 %v 已更新\n", domain.Names)
-		hookSummary := runPostRenewHooks(hooks, domain.Names[0], certPath, keyPath)
+		log.Printf("证书 %v 已更新并完成部署步骤\n", domain.Names)
 
 		// 获取新证书信息并发送成功通知
 		if emailService != nil && emailService.IsEnabled() {
@@ -222,6 +244,83 @@ func obtainOrRenew(certDir string, user *MyUser, domain providers.Domain, hooks 
 				log.Printf("[警告] 即将到期邮件通知发送失败: %v", emailErr)
 			}
 		}
+	}
+	return nil
+}
+
+func installAndDeploy(certPath, keyPath string, certPEM, keyPEM []byte, hooks []string, domain string) (string, error) {
+	if err := saveCertificatePair(certPath, keyPath, certPEM, keyPEM); err != nil {
+		return "", fmt.Errorf("certificate persistence: %w", err)
+	}
+	summary, err := runPostRenewHooks(hooks, domain, certPath, keyPath)
+	if err != nil {
+		return summary, fmt.Errorf("deployment: %w", err)
+	}
+	return summary, nil
+}
+
+func writeTempFile(dir, pattern string, data []byte) (path string, err error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	path = f.Name()
+	defer func() {
+		if closeErr := f.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+	if err = f.Chmod(0600); err != nil {
+		return path, err
+	}
+	if _, err = f.ReadFrom(bytes.NewReader(data)); err != nil {
+		return path, err
+	}
+	if err = f.Sync(); err != nil {
+		return path, err
+	}
+	return path, nil
+}
+
+func saveCertificatePair(certPath, keyPath string, certPEM, keyPEM []byte) error {
+	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+		return fmt.Errorf("certificate and private key do not match or are invalid: %w", err)
+	}
+
+	certTemp, err := writeTempFile(filepath.Dir(certPath), ".acme4-cert-*", certPEM)
+	if err != nil {
+		return fmt.Errorf("write certificate temporary file: %w", err)
+	}
+	defer os.Remove(certTemp)
+	keyTemp, err := writeTempFile(filepath.Dir(keyPath), ".acme4-key-*", keyPEM)
+	if err != nil {
+		return fmt.Errorf("write private key temporary file: %w", err)
+	}
+	defer os.Remove(keyTemp)
+	for _, destination := range []string{certPath, keyPath} {
+		if info, statErr := os.Stat(destination); statErr == nil && !info.Mode().IsRegular() {
+			return fmt.Errorf("destination is not a regular file: %s", destination)
+		} else if statErr != nil && !os.IsNotExist(statErr) {
+			return fmt.Errorf("inspect destination %s: %w", destination, statErr)
+		}
+	}
+	oldKey, oldKeyErr := os.ReadFile(keyPath)
+	keyExisted := oldKeyErr == nil
+	if oldKeyErr != nil && !os.IsNotExist(oldKeyErr) {
+		return fmt.Errorf("backup private key: %w", oldKeyErr)
+	}
+
+	if err := replaceFile(keyTemp, keyPath); err != nil {
+		return fmt.Errorf("install private key: %w", err)
+	}
+	if err := replaceFile(certTemp, certPath); err != nil {
+		var rollbackErr error
+		if keyExisted {
+			rollbackErr = os.WriteFile(keyPath, oldKey, 0600)
+		} else {
+			rollbackErr = os.Remove(keyPath)
+		}
+		return errors.Join(fmt.Errorf("install certificate: %w", err), rollbackErr)
 	}
 	return nil
 }
@@ -302,9 +401,9 @@ func expandHookCommand(cmdStr, domain, certPath, keyPath string) (string, error)
 	return expanded, nil
 }
 
-func runPostRenewHooks(hooks []string, domain, certPath, keyPath string) string {
+func runPostRenewHooks(hooks []string, domain, certPath, keyPath string) (string, error) {
 	if len(hooks) == 0 {
-		return "未配置后续命令；证书文件已更新。"
+		return "未配置后续命令；证书文件已更新。", nil
 	}
 
 	successCount := 0
@@ -330,55 +429,44 @@ func runPostRenewHooks(hooks []string, domain, certPath, keyPath string) string 
 	}
 
 	if failureCount > 0 {
-		return fmt.Sprintf("后续命令执行完成：成功 %d 个，失败 %d 个；请查看日志确认服务是否已加载新证书。", successCount, failureCount)
+		summary := fmt.Sprintf("后续命令执行完成：成功 %d 个，失败 %d 个；请查看日志确认服务是否已加载新证书。", successCount, failureCount)
+		return summary, errors.New(summary)
 	}
 
-	return fmt.Sprintf("后续命令执行完成：成功 %d 个，失败 0 个。", successCount)
+	return fmt.Sprintf("后续命令执行完成：成功 %d 个，失败 0 个。", successCount), nil
 }
 
-func main() {
-	log.Printf("程序启动: %s", time.Now().Format("2006-01-02 15:04:05"))
-	sslDomain := flag.String("ssl-domain", "", "检查远程主机(域名)的TLS证书信息")
-	configPath := flag.String("config", "config.yaml", "配置文件路径")
-	flag.Parse()
-
-	if *sslDomain != "" {
-		err := checkRemoteDomain(*sslDomain)
-		if err != nil {
-			fmt.Printf("检查远程域名失败: %v\n", err)
-			os.Exit(2)
-		}
-		os.Exit(0)
-	}
-
-	cfg, err := loadConfig(*configPath)
+func run(configPath string) error {
+	cfg, err := loadConfig(configPath)
 	if err != nil {
-		log.Fatalf("[致命] 配置文件加载失败: %v\n请检查 config.yaml 路径和内容是否正确。", err)
+		return fmt.Errorf("配置文件加载失败: %w", err)
 	}
-	// 如果配置中指定了 DNS 解析器，则仅在此时设置为生效
-	if len(cfg.DNSResolvers) > 0 {
-		var normalized []string
-		for _, r := range cfg.DNSResolvers {
-			rr := strings.TrimSpace(r)
-			if rr == "" {
-				continue
-			}
-			if !strings.Contains(rr, ":") {
-				rr = rr + ":53"
-			}
-			normalized = append(normalized, rr)
-		}
-		if len(normalized) > 0 {
-			os.Setenv("LEGO_DNS_RESOLVERS", strings.Join(normalized, ","))
-			log.Printf("使用自定义 DNS 检测解析器: %s", strings.Join(cfg.DNSResolvers, ", "))
-		}
+	if cfg.AccountDir == "" || cfg.CertDir == "" {
+		return errors.New("配置错误: account_dir 和 cert_dir 不能为空")
 	}
-	_ = ensureDir(cfg.CertDir)
-	_ = ensureDir(cfg.AccountDir)
+	if err := ensureDir(cfg.AccountDir); err != nil {
+		return fmt.Errorf("创建账户目录失败: %w", err)
+	}
+	lock, err := acquireOperationLock(cfg.AccountDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := ensureDir(cfg.CertDir); err != nil {
+		return fmt.Errorf("创建证书目录失败: %w", err)
+	}
+
+	resolvers, err := normalizeResolvers(cfg.DNSResolvers)
+	if err != nil {
+		return fmt.Errorf("DNS resolver 配置错误: %w", err)
+	}
+	if len(resolvers) > 0 {
+		log.Printf("使用自定义 DNS 检测解析器: %s", strings.Join(resolvers, ", "))
+	}
 
 	user, err := loadOrCreateUser(cfg.Email, cfg.AccountDir)
 	if err != nil {
-		log.Fatalf("[致命] 账户初始化失败: %v\n请检查邮箱配置和账户目录权限。", err)
+		return fmt.Errorf("账户初始化失败: %w", err)
 	}
 	// 初始化邮件服务
 	var emailService *notification.EmailService
@@ -410,10 +498,8 @@ func main() {
 		renewBefore = renewBeforeDefault
 	}
 
-	// 分离 Hurricane Electric 和其他 provider 的域名
 	var hurricaneDomains []providers.Domain
 	var otherDomains []providers.Domain
-
 	for _, d := range cfg.Domains {
 		if d.Provider == "hurricane" {
 			hurricaneDomains = append(hurricaneDomains, d)
@@ -423,28 +509,97 @@ func main() {
 	}
 	logHurricaneSharedChallengeWarnings(hurricaneDomains)
 
-	// 先处理其他 provider 的域名
-	for _, d := range otherDomains {
-		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, renewBefore, emailService); err != nil {
-			log.Printf("[错误] 域名 %v 证书处理失败: %v\n建议检查 DNS 配置、Provider 凭证和网络连通性。", d.Names, err)
+	var failures []error
+	process := func(d providers.Domain) {
+		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, renewBefore, emailService, cfg.ACMEDirectoryURL, resolvers); err != nil {
+			log.Printf("[错误] 域名 %v 证书处理失败: %v", d.Names, err)
+			if d.Provider == "hurricane" {
+				if advice := hurricaneFailureAdvice(err, d.Names); advice != "" {
+					log.Printf("[Hurricane Electric] 诊断建议: %s", advice)
+				}
+			}
+			if emailService != nil && emailService.IsEnabled() {
+				advice := ""
+				if d.Provider == "hurricane" {
+					advice = hurricaneFailureAdvice(err, d.Names)
+				}
+				notificationData := notification.NotificationData{
+					Domains:   d.Names,
+					Success:   false,
+					Error:     err.Error(),
+					Timestamp: time.Now(),
+					Advice:    advice,
+				}
+				if emailErr := emailService.SendFailureNotification(notificationData); emailErr != nil {
+					log.Printf("[警告] 邮件通知发送失败: %v", emailErr)
+				}
+			}
+			failures = append(failures, fmt.Errorf("%v: %w", d.Names, err))
 		}
 	}
-
-	// 然后按顺序处理 Hurricane Electric 的域名，避免并发冲突
+	for _, d := range otherDomains {
+		process(d)
+	}
 	log.Printf("[Hurricane Electric] 开始顺序处理 %d 个 Hurricane Electric 域名", len(hurricaneDomains))
 	for i, d := range hurricaneDomains {
 		log.Printf("[Hurricane Electric] 处理第 %d/%d 个域名: %v", i+1, len(hurricaneDomains), d.Names)
-		if err := obtainOrRenew(cfg.CertDir, user, d, cfg.PostRenewHooks, renewBefore, emailService); err != nil {
-			log.Printf("[错误] Hurricane Electric 域名 %v 证书处理失败: %v\n建议检查 DNS 配置、Provider 凭证和网络连通性。", d.Names, err)
-			if advice := hurricaneFailureAdvice(err, d.Names); advice != "" {
-				log.Printf("[Hurricane Electric] 诊断建议: %s", advice)
-			}
+		process(d)
+	}
+	log.Printf("处理汇总: 总计=%d 成功=%d 失败=%d", len(cfg.Domains), len(cfg.Domains)-len(failures), len(failures))
+	if len(failures) > 0 {
+		return fmt.Errorf("处理完成，共 %d 组域名失败: %w", len(failures), errors.Join(failures...))
+	}
+	return nil
+}
+
+func normalizeResolvers(values []string) ([]string, error) {
+	var result []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
 		}
-		// 在 Hurricane Electric 域名之间添加延迟，确保 DNS 记录完全生效
-		// if i < len(hurricaneDomains)-1 {
-		// 	log.Printf("[Hurricane Electric] 等待 10 秒后处理下一个域名...")
-		// 	time.Sleep(10 * time.Second)
-		// }
+		if host, port, err := net.SplitHostPort(value); err == nil {
+			portNumber, parseErr := strconv.Atoi(port)
+			if parseErr != nil || portNumber < 1 || portNumber > 65535 {
+				return nil, fmt.Errorf("解析器 %q 的端口无效", value)
+			}
+			result = append(result, net.JoinHostPort(host, port))
+			continue
+		}
+		if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+			value = strings.TrimSuffix(strings.TrimPrefix(value, "["), "]")
+		}
+		if ip := net.ParseIP(value); ip != nil {
+			result = append(result, net.JoinHostPort(value, "53"))
+			continue
+		}
+		if strings.Contains(value, ":") {
+			return nil, fmt.Errorf("解析器 %q 不是有效的 IPv6 地址或 host:port", value)
+		}
+		result = append(result, net.JoinHostPort(value, "53"))
+	}
+	return result, nil
+}
+
+func main() {
+	log.Printf("程序启动: %s", time.Now().Format("2006-01-02 15:04:05"))
+	sslDomain := flag.String("ssl-domain", "", "检查远程主机(域名)的TLS证书信息")
+	configPath := flag.String("config", "config.yaml", "配置文件路径")
+	flag.Parse()
+
+	if *sslDomain != "" {
+		err := checkRemoteDomain(*sslDomain)
+		if err != nil {
+			fmt.Printf("检查远程域名失败: %v\n", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
+	if err := run(*configPath); err != nil {
+		log.Printf("[失败] %v", err)
+		os.Exit(1)
 	}
 	log.Printf("程序结束: %s", time.Now().Format("2006-01-02 15:04:05"))
 }

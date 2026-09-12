@@ -1,15 +1,25 @@
 email: "your@email.com"
 domains:
+  # 已将 _acme-challenge.example.com CNAME 委派到
+  # example-com.acme.validation-domain.tld（Cloudflare 专用验证 zone）。
+  # names 保持业务域名不变，Cloudflare provider 会跟随 CNAME 写目标 TXT。
   - names: ["example.com", "*.example.com"]
+    provider: "cloudflare"
+    credentials:
+      # Token 仅需专用验证 zone 的 DNS 编辑 + Zone 读取权限。
+      api_token: "CF_VALIDATION_ZONE_TOKEN"
+  - names: ["example.net"]
     provider: "hurricane"
     credentials:
       # Hurricane Electric expects the same format as HURRICANE_TOKENS:
-      # a comma-separated key=value map where the key is the domain or full hostname.
+      # a comma-separated key:token map where the key is the domain or full hostname.
+      # lego requires ':' between a record name and its token (not '=').
       # Common case:
-      # api_key: "example.com=HE_API_KEY"
+      # api_key: "example.net:HE_API_KEY"
       # If you need a record-specific override, use the full hostname:
-      # api_key: "example.com=HE_API_KEY,_acme-challenge.example.com=HE_RECORD_TOKEN"
-      api_key: "example.com=HE_API_KEY"
+      # api_key: "example.net:HE_API_KEY,_acme-challenge.example.net:HE_RECORD_TOKEN"
+      # The full hostname takes precedence over the domain token.
+      api_key: "example.net:HE_API_KEY"
     # Hurricane 可用环境变量调优：
     # HURRICANE_PROPAGATION_TIMEOUT=300
     # HURRICANE_SEQUENCE_INTERVAL=120
@@ -32,9 +42,13 @@ domains:
 cert_dir: "./certs"
 account_dir: "./accounts"
 renew_before: 30 # 证书到期前多少天开始续期，默认30天
+# 可选。省略时使用当前生产 CA；staging 必须同时使用独立的
+# cert_dir、account_dir，并关闭 post_renew_hooks（见 README）。
+# acme_directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"
 dns_resolvers:
-  - "8.8.8.8"   # 可选，指定 DNS 检测解析器；未指定则使用系统默认
-  - "1.1.1.1"
+  - "8.8.8.8:53"   # 可选，指定 DNS 检测解析器；支持 IPv4/IPv6 和端口
+  - "1.1.1.1:53"
+  # - "[2001:4860:4860::8888]:53"
 post_renew_hooks:
   - "nginx -s reload"
   # 内置 hook 示例：上传当前证书到腾讯云 SSL 证书服务

@@ -17,19 +17,23 @@
 email: "your@email.com"
 domains:
   - names: ["example.com", "*.example.com"]
-    provider: "hurricane"
-    credentials:
-      api_key: "example.com=HE_API_KEY"
-  - names: ["example.net"]
+    # _acme-challenge.example.com 在 Hurricane 中 CNAME 到 Cloudflare
+    # 的专用验证域名；names 不需要改成委派后的域名。
     provider: "cloudflare"
     credentials:
       api_token: "CF_xxx"
+  - names: ["example.net"]
+    provider: "hurricane"
+    credentials:
+      api_key: "example.net:HE_API_KEY"
   # ...更多域名
 cert_dir: "./certs"
 account_dir: "./accounts"
 post_renew_hooks:
   - "nginx -s reload"
 renew_before: 30   # 可选，证书到期前多少天自动续期，默认30天
+# 可选：Let's Encrypt staging；生产配置可省略并使用默认 CA。
+# acme_directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"
 
 # 邮件通知配置（可选）
 email_notification:
@@ -45,14 +49,15 @@ email_notification:
   notify_on_expiry: true
 ```
 
-Hurricane Electric 的 `credentials.api_key` 不是单个 token，而是兼容 `HURRICANE_TOKENS` 的 `key=value[,key=value...]` 映射串：
+Hurricane Electric 的 `credentials.api_key` 不是单个 token，而是兼容 `HURRICANE_TOKENS` 的
+`key:token[,key:token...]` 映射串。冒号是 lego 当前要求的分隔符；旧配置中的 `=` 仅作为迁移兼容格式，建议改为冒号：
 
 ```yaml
 domains:
   - names: ["example.com", "*.example.com"]
     provider: "hurricane"
     credentials:
-      api_key: "example.com=HE_API_KEY"
+      api_key: "example.com:HE_API_KEY"
 ```
 
 如需给特定记录覆盖 token，可以使用完整主机名作为 key：
@@ -62,8 +67,10 @@ domains:
   - names: ["example.com", "*.example.com"]
     provider: "hurricane"
     credentials:
-      api_key: "example.com=HE_API_KEY,_acme-challenge.example.com=HE_RECORD_TOKEN"
+      api_key: "example.com:HE_API_KEY,_acme-challenge.example.com:HE_RECORD_TOKEN"
 ```
+
+凭据匹配时，完整记录主机名（例如 `_acme-challenge.example.com`）优先于域名级 token（`example.com`）。因此，只有确实为某条记录单独生成 token 时才添加完整主机名项；不要依赖映射项顺序覆盖 token。
 
 Hurricane Electric 的动态 DNS TXT 更新更适合顺序验证。程序会对 Hurricane provider 使用更保守的默认值：
 
@@ -73,6 +80,22 @@ Hurricane Electric 的动态 DNS TXT 更新更适合顺序验证。程序会对 
 - `HURRICANE_INTERVAL_RETRY_WAIT`: 默认 `30` 秒，限流重试初始等待时间，后续按 2 倍退避。
 
 如果 `example.com` 和 `*.example.com` 共享 `_acme-challenge.example.com`，程序会打印风险提示，并按 lego 的顺序验证流程逐个写入、验证和清理 TXT 记录。
+
+### Hurricane 业务 DNS + Cloudflare 验证委派
+
+推荐把业务 DNS 继续放在 Hurricane，只把 ACME 验证记录委派给专用的 Cloudflare zone。以 `example.com` 为例：
+
+```text
+Hurricane（业务 zone）
+_acme-challenge.example.com  CNAME  example-com.acme.validation-domain.tld.
+
+Cloudflare（专用验证 zone）
+example-com.acme.validation-domain.tld  TXT  <由 ACME 本次挑战写入的值>
+```
+
+在 Hurricane 中预先创建 CNAME，并等待旧 TXT 的 TTL/缓存过期；Cloudflare 中的目标 TXT 由 lego 创建和按记录 ID 清理，不要手工固定挑战值。每个不同的原始 challenge 主机名使用独立目标；根域名和对应泛域名共享同一 `_acme-challenge.example.com` CNAME。不同原始域名（例如 `example.net`）应使用另一个目标（如 `example-net.acme.validation-domain.tld`）。
+
+委派后，配置中的 `names`、证书路径和 hook 保持不变，只把该条目的 `provider` 改为 `cloudflare`，因为 Cloudflare 是实际写入验证 TXT 的 provider。Cloudflare API token 只授予专用验证 zone 的 DNS 编辑和 Zone 读取权限，不要使用账户级全局 API Key。生产迁移前应在独立 staging 配置中验证 CNAME 跟随、同名多 TXT 共存和精确清理。
 
 ### 2. 运行
 
@@ -91,8 +114,24 @@ go build -o acme4
 
 ### 3. crontab 自动化（示例）
 ```sh
-0 3 * * * /path/to/acme4 -config=/path/to/config.yaml >> /var/log/acme4.log 2>&1
+# 每 6 小时检查一次；定时与手动执行必须使用同一 account_dir 才能互斥
+0 */6 * * * cd /path/to/acme4 && /path/to/acme4 -config=/path/to/config.yaml >> /var/log/acme4.log 2>&1
 ```
+
+程序默认在证书到期前 30 天进入续签窗口；有效证书会在每轮检查中跳过，失败则留到下一轮重试。单机任务会对 `account_dir` 加锁，锁被占用时以非零状态退出。
+
+### staging 验证
+
+staging 必须使用独立的配置、账户目录、证书目录和 hook 设置，避免测试账户、证书或部署动作污染生产：
+
+```yaml
+acme_directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"
+cert_dir: "./certs-staging"
+account_dir: "./accounts-staging"
+post_renew_hooks: []
+```
+
+重复测试应使用新的 staging 账户或清理 staging 状态，确保实际触发 DNS-01 challenge，不要把 CA 授权缓存命中当作 DNS 委派验收。迁移到生产时恢复生产 CA、生产目录和经审阅的 hook 配置。
 
 ## 目录结构说明
 - `main.go`        主程序入口

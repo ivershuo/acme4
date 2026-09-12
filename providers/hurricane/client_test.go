@@ -92,13 +92,13 @@ func TestUpdateTxtRecord_TokenLookup(t *testing.T) {
 			expectToken: "specific-token",
 		},
 		{
-			name:     "Domain token takes precedence",
+			name:     "Hostname token takes precedence",
 			hostname: "_acme-challenge.example.com",
 			credentials: map[string]string{
 				"example.com":                 "domain-token",
 				"_acme-challenge.example.com": "specific-token",
 			},
-			expectToken: "domain-token",
+			expectToken: "specific-token",
 		},
 		{
 			name:     "No token found",
